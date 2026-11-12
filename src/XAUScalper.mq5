@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "2.00"
+#property version   "2.10"
 #property description "XAUUSD scalper with an on-chart control panel."
 #property description "Strategies: Trend Pullback (default) and Momentum Burst."
 
@@ -58,8 +58,9 @@ input double        InpMaxRiskAtMinLot   = 5.0;           // Small accounts: all
 input double        InpMarginBuffer      = 50.0;          // Keep at least this % of free margin unused
 
 input group "Momentum Burst stops (price distance: 2.00 = a $2 move in gold)"
-input double        InpStopLoss          = 1.50;          // Hard stop loss distance (required)
-input double        InpTakeProfit        = 1.50;          // Take profit distance (0 = none)
+input double        InpStopLoss          = 1.20;          // Hard stop loss on the order (safety net)
+input double        InpTakeProfit        = 0.00;          // Take profit distance (0 = none, let winners run)
+input double        InpCutLoss           = 0.50;          // Close a loser at this loss (min 2x spread)
 
 input group "Filters and limits (Max positions / cooldown / trades per minute are used in Custom profile)"
 input double        InpMaxSpread         = 0.35;          // Max spread in price (0 = off)
@@ -87,14 +88,14 @@ input double        InpBurstMinMove      = 0.50;          // ...and at least thi
 input int           InpBurstMinTicks     = 6;             // Min price changes inside the window
 input double        InpBurstDirRatio     = 0.70;          // Share of ticks in the burst direction (0.5-1)
 input int           InpMaxStack          = 3;             // Max positions stacked in one direction
-input double        InpStackStep         = 0.30;          // Add only when newest position is up this much
+input double        InpStackStep         = 0.40;          // Add only when newest position is up this much
 input bool          InpReverseOnBurst    = true;          // Opposite burst: close all and reverse
-input double        InpBreakEvenTrigger  = 0.30;          // Move SL to breakeven at this profit (0 = off)
-input double        InpBreakEvenLock     = 0.05;          // Profit locked at breakeven
-input double        InpTrailStart        = 0.50;          // Start trailing at this profit (0 = off)
-input double        InpTrailDistance     = 0.30;          // Trailing distance behind price
+input double        InpBreakEvenTrigger  = 0.50;          // Move SL to breakeven at this profit (0 = off)
+input double        InpBreakEvenLock     = 0.10;          // Profit locked at breakeven
+input double        InpTrailStart        = 1.00;          // Start trailing at this profit (0 = off)
+input double        InpTrailDistance     = 0.50;          // Trailing distance behind price
 input double        InpTrailStep         = 0.05;          // Min SL move before modifying
-input int           InpMaxHoldSec        = 20;            // Close any trade after N seconds (0 = off)
+input int           InpMaxHoldSec        = 15;            // Close a trade not yet in profit after N seconds (0 = off)
 
 input group "Session (PC local time)"
 input bool          InpUseSession        = false;         // Limit trading to session hours (false = trade any time)
@@ -164,6 +165,9 @@ struct StrategyParams
    double trailStart;
    double trailDist;
    int    maxHoldSec;
+   double hardSL;
+   double tpDist;
+   double cutLoss;
   };
 StrategyParams g_p;
 ENUM_PROFILE   g_profile = PROFILE_BALANCED;
@@ -173,6 +177,36 @@ int            g_hPullEMA  = INVALID_HANDLE;
 int            g_hATR      = INVALID_HANDLE;
 datetime       g_pbLastBar = 0;
 string         g_pbStatus  = "waiting for the next bar";
+long           g_reasonPos[];             // positions closed by the bot, and why (for the journal)
+string         g_reasonText[];
+
+void NoteCloseReason(const ulong ticket, const string why)
+  {
+   int n = ArraySize(g_reasonPos);
+   if(n >= 200)
+     {
+      ArrayRemove(g_reasonPos, 0, 100);
+      ArrayRemove(g_reasonText, 0, 100);
+      n = ArraySize(g_reasonPos);
+     }
+   ArrayResize(g_reasonPos, n + 1);
+   ArrayResize(g_reasonText, n + 1);
+   g_reasonPos[n]  = (long)ticket;
+   g_reasonText[n] = why;
+  }
+
+string TakeCloseReason(const long position)
+  {
+   for(int i = ArraySize(g_reasonPos) - 1; i >= 0; i--)
+      if(g_reasonPos[i] == position)
+        {
+         string why = g_reasonText[i];
+         ArrayRemove(g_reasonPos, i, 1);
+         ArrayRemove(g_reasonText, i, 1);
+         return why;
+        }
+   return "";
+  }
 
 string ProfileName(ENUM_PROFILE p)
   {
@@ -186,8 +220,10 @@ string ProfileName(ENUM_PROFILE p)
   }
 
 void SetParams(int window, double mult, double minMove, int ticks, double ratio, int stack, double step,
-               int cooldown, int perMin, double beT, double beL, double trS, double trD, int hold)
+               int cooldown, int perMin, double beT, double beL, double trS, double trD, int hold,
+               double hardSL, double tp, double cut)
   {
+   g_p.hardSL = hardSL;  g_p.tpDist = tp;  g_p.cutLoss = cut;
    g_p.windowMs = window;  g_p.spreadMult = mult;  g_p.minMove = minMove;  g_p.minTicks = ticks;
    g_p.dirRatio = ratio;   g_p.maxStack = stack;   g_p.stackStep = step;   g_p.maxPositions = stack;
    g_p.cooldownSec = cooldown;  g_p.maxTradesPerMin = perMin;
@@ -198,14 +234,16 @@ void ApplyProfile()
   {
    switch(g_profile)
      {
-      //                   window mult  min   ticks ratio stack step cool /min  BE    lock  trail dist hold
-      case PROFILE_SAFE:       SetParams(3000, 3.0, 0.50, 6, 0.70, 2, 0.30, 3, 10, 0.30, 0.05, 0.50, 0.30, 20); break;
-      case PROFILE_BALANCED:   SetParams(2000, 2.5, 0.40, 5, 0.68, 3, 0.25, 1, 20, 0.25, 0.05, 0.40, 0.25, 15); break;
-      case PROFILE_AGGRESSIVE: SetParams(1500, 2.0, 0.30, 4, 0.65, 5, 0.20, 0, 40, 0.20, 0.03, 0.30, 0.20, 10); break;
+      // Cut losers fast, let winners run: small loss cut, no take profit, wide trailing stop.
+      //                       window mult min  ticks ratio stack step cool /min BE   lock trail dist hold hardSL TP  cut
+      case PROFILE_SAFE:       SetParams(3000, 3.0, 0.50, 6, 0.70, 2, 0.50, 3, 10, 0.60, 0.10, 1.20, 0.60, 20, 1.50, 0, 0.60); break;
+      case PROFILE_BALANCED:   SetParams(2000, 2.5, 0.40, 5, 0.68, 3, 0.40, 1, 20, 0.50, 0.10, 1.00, 0.50, 15, 1.20, 0, 0.50); break;
+      case PROFILE_AGGRESSIVE: SetParams(1500, 2.0, 0.30, 4, 0.65, 5, 0.30, 0, 40, 0.40, 0.05, 0.80, 0.40, 10, 1.00, 0, 0.40); break;
       default:
          SetParams(InpBurstWindowMs, InpBurstSpreadMult, InpBurstMinMove, InpBurstMinTicks, InpBurstDirRatio,
                    InpMaxStack, InpStackStep, InpCooldownSec, InpMaxTradesPerMin, InpBreakEvenTrigger,
-                   InpBreakEvenLock, InpTrailStart, InpTrailDistance, InpMaxHoldSec);
+                   InpBreakEvenLock, InpTrailStart, InpTrailDistance, InpMaxHoldSec,
+                   InpStopLoss, InpTakeProfit, InpCutLoss);
          g_p.maxPositions = InpMaxPositions;
          break;
      }
@@ -325,7 +363,10 @@ void CloseSide(const int dir)
          continue;
       bool isBuy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
       if((dir > 0) == isBuy)
+        {
+         NoteCloseReason(ticket, "reverse");
          g_trade.PositionClose(ticket, InpSlippagePoints);
+        }
      }
   }
 
@@ -354,7 +395,7 @@ void RunBurst()
    if(BlockReason() != "")
       return;
 
-   OpenTrade(dir, sameCount > 0 ? "STACK" : "BURST");
+   OpenTradeEx(dir, sameCount > 0 ? "STACK" : "BURST", g_p.hardSL, g_p.tpDist);
   }
 
 // Burst: breakeven, trailing stop and max hold time for every open position of this EA.
@@ -384,9 +425,20 @@ void ManageBurst()
       ulong  openMs = (ulong)PositionGetInteger(POSITION_TIME_MSC);
       double profit = isBuy ? tick.bid - open : open - tick.ask;
 
-      // Max hold time
-      if(g_p.maxHoldSec > 0 && nowMsc > openMs && nowMsc - openMs >= (ulong)g_p.maxHoldSec * 1000)
+      // 1. Cut losers fast (never tighter than 2x spread, or noise alone would hit it)
+      double cut = MathMax(g_p.cutLoss, 2.0 * (tick.ask - tick.bid));
+      if(g_p.cutLoss > 0 && profit <= -cut)
         {
+         NoteCloseReason(ticket, "loss cut");
+         g_trade.PositionClose(ticket, InpSlippagePoints);
+         continue;
+        }
+
+      // 2. Time stop only for trades that are not winning yet; winners are left to run
+      bool winning = (g_p.beTrigger > 0) ? profit >= g_p.beTrigger : profit > 0;
+      if(!winning && g_p.maxHoldSec > 0 && nowMsc > openMs && nowMsc - openMs >= (ulong)g_p.maxHoldSec * 1000)
+        {
+         NoteCloseReason(ticket, "time stop");
          g_trade.PositionClose(ticket, InpSlippagePoints);
          continue;
         }
@@ -1390,7 +1442,14 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
    // A closing SELL deal closes a BUY position and vice versa
    string side = (dealType == DEAL_TYPE_SELL) ? "BUY" : "SELL";
    double hold = (inMsc > 0 && outMsc >= inMsc) ? (outMsc - inMsc) / 1000.0 : 0.0;
-   JournalWrite("CLOSE", posId, side, tag, lots, price, CurrentSpread(), profit, hold, DealReasonText(reason));
+   string why = TakeCloseReason(posId);
+   if(why == "")
+     {
+      why = DealReasonText(reason);
+      if(reason == DEAL_REASON_SL && profit >= 0)
+         why = "trailing/breakeven stop";
+     }
+   JournalWrite("CLOSE", posId, side, tag, lots, price, CurrentSpread(), profit, hold, why);
   }
 
 //==================================================================

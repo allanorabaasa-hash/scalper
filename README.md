@@ -41,18 +41,23 @@ No indicators, only raw ticks.
 
 ### Profiles
 
-Switch with the strategy button on the panel: PULLBACK -> BURST SAFE -> BALANCED -> AGGRESSIVE -> CUSTOM. The trade journal records which
-profile opened each trade.
+Switch with the strategy button on the panel: PULLBACK -> BURST SAFE -> BALANCED -> AGGRESSIVE -> CUSTOM.
+
+Exits follow **cut losers fast, let winners run**: a loser is closed at a small loss
+(never less than 2x spread), a trade that is not winning after N seconds is closed,
+winners have **no take profit** and are protected by breakeven and a wide trailing stop.
 
 | | Safe | Balanced | Aggressive |
 |---|---|---|---|
 | Burst window | 3.0 s | 2.0 s | 1.5 s |
 | Move needed | 3x spread, min 0.50 | 2.5x spread, min 0.40 | 2x spread, min 0.30 |
 | Min ticks / direction share | 6 / 70% | 5 / 68% | 4 / 65% |
-| Max stack | 2 | 3 | 5 |
+| Max stack (adds only to winners) | 2 | 3 | 5 |
 | Cooldown / max per minute | 3 s / 10 | 1 s / 20 | none / 40 |
-| Breakeven / trail start / trail distance | 0.30 / 0.50 / 0.30 | 0.25 / 0.40 / 0.25 | 0.20 / 0.30 / 0.20 |
-| Max hold | 20 s | 15 s | 10 s |
+| Loss cut | 0.60 | 0.50 | 0.40 |
+| Time stop (non-winners) | 20 s | 15 s | 10 s |
+| Breakeven at / trail from / trail distance | 0.60 / 1.20 / 0.60 | 0.50 / 1.00 / 0.50 | 0.40 / 0.80 / 0.40 |
+| Hard SL on the order / TP | 1.50 / none | 1.20 / none | 1.00 / none |
 
 *Custom* uses the values from the inputs.
 
