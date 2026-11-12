@@ -81,6 +81,7 @@ double         g_floating        = 0.0;
 string         g_lastMsg         = "Ready. Press START to begin.";
 color          g_lastMsgColor    = clrSilver;
 ulong          g_rowTicket[MAX_ROWS];
+bool           g_collapsed       = false;
 
 //--- Panel colours
 const color CLR_BG      = C'22,27,34';
@@ -130,6 +131,7 @@ int OnInit()
 
    ArrayInitialize(g_rowTicket, 0);
    ChartSetInteger(0, CHART_FOREGROUND, false);
+   ChartSetInteger(0, CHART_SHOW_ONE_CLICK, false);   // MT5 one-click box would cover the panel
 
    g_state = BOT_STOPPED;
    // Keep RUNNING state only across a timeframe switch or input change,
@@ -204,6 +206,11 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
       DoManual(1);
    else if(sparam == P("b_sell"))
       DoManual(-1);
+   else if(sparam == P("b_min"))
+     {
+      g_collapsed = !g_collapsed;
+      ApplyCollapse();
+     }
    else if(StringFind(sparam, P("rx")) == 0)
      {
       int idx = (int)StringToInteger(StringSubstr(sparam, StringLen(P("rx"))));
@@ -227,7 +234,7 @@ void DoStart()
      }
    g_state = BOT_RUNNING;
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
-      Msg("Bot STARTED, but the Algo Trading button in MT5 is OFF. Turn it on.", CLR_AMBER);
+      Msg("STARTED, but Algo Trading is OFF in the MT5 toolbar.", CLR_AMBER);
    else
       Msg("Bot STARTED.", CLR_GREEN);
   }
@@ -370,7 +377,7 @@ void CheckDailyLimits()
       g_dailyLimitDay = today;
       g_state         = BOT_STOPPED;
       CloseAll(reason);
-      Msg(reason + ". Positions closed, trading locked until tomorrow.", reason == "Daily loss limit hit" ? CLR_RED : CLR_GREEN);
+      Msg(reason + ". Locked until tomorrow.", reason == "Daily loss limit hit" ? CLR_RED : CLR_GREEN);
      }
   }
 
@@ -453,7 +460,7 @@ bool OpenTrade(const int dir, const string tag)
    double lots = CalcLots(slDist);
    if(lots <= 0)
      {
-      Msg("Lot size would be below the broker minimum for this risk. Trade skipped.", CLR_AMBER);
+      Msg("Lot below broker minimum for this risk. Trade skipped.", CLR_AMBER);
       return false;
      }
 
@@ -660,7 +667,7 @@ void MkLabel(const string name, int x, int y, const string text, color clr,
    ObjectSetString(0, o, OBJPROP_FONT, font);
    ObjectSetInteger(0, o, OBJPROP_FONTSIZE, size);
    ObjectSetInteger(0, o, OBJPROP_COLOR, clr);
-   ObjectSetString(0, o, OBJPROP_TEXT, (text == "" ? " " : text));
+   ObjectSetString(0, o, OBJPROP_TEXT, Fit(text));
    ObjectSetInteger(0, o, OBJPROP_BACK, false);
    ObjectSetInteger(0, o, OBJPROP_SELECTABLE, false);
    ObjectSetInteger(0, o, OBJPROP_HIDDEN, true);
@@ -690,15 +697,27 @@ void MkButton(const string name, int x, int y, int w, int h, const string text,
    ObjectSetInteger(0, o, OBJPROP_ZORDER, 10);
   }
 
+// MT5 chart labels show at most 63 characters.
+string Fit(const string text)
+  {
+   if(text == "")
+      return " ";
+   if(StringLen(text) > 63)
+      return StringSubstr(text, 0, 60) + "...";
+   return text;
+  }
+
 void SetText(const string name, const string text, color clr)
   {
    string o = P(name);
-   ObjectSetString(0, o, OBJPROP_TEXT, (text == "" ? " " : text));
+   ObjectSetString(0, o, OBJPROP_TEXT, Fit(text));
    ObjectSetInteger(0, o, OBJPROP_COLOR, clr);
   }
 
 void ShowObj(const string name, bool show)
   {
+   if(g_collapsed)
+      show = false;
    ObjectSetInteger(0, P(name), OBJPROP_TIMEFRAMES, show ? OBJ_ALL_PERIODS : OBJ_NO_PERIODS);
   }
 
@@ -719,6 +738,28 @@ int ColX(int col)
      }
   }
 
+bool AlwaysVisible(const string name)
+  {
+   return name == P("bg") || name == P("header") || name == P("title")
+          || name == P("pill") || name == P("pill_t") || name == P("b_min");
+  }
+
+// Collapse the panel to its header bar, or expand it again.
+void ApplyCollapse()
+  {
+   int total = ObjectsTotal(0, 0, -1);
+   for(int i = 0; i < total; i++)
+     {
+      string name = ObjectName(0, i, 0, -1);
+      if(StringFind(name, PREFIX) != 0 || AlwaysVisible(name))
+         continue;
+      ObjectSetInteger(0, name, OBJPROP_TIMEFRAMES, g_collapsed ? OBJ_NO_PERIODS : OBJ_ALL_PERIODS);
+     }
+   ObjectSetInteger(0, P("bg"), OBJPROP_YSIZE, g_collapsed ? 36 : PANEL_H);
+   ObjectSetString(0, P("b_min"), OBJPROP_TEXT, g_collapsed ? "+" : "-");
+   UpdatePanel();
+  }
+
 void BuildPanel()
   {
    // Frame and header
@@ -727,6 +768,7 @@ void BuildPanel()
    MkLabel("title", 14, 9, "XAU SCALPER", CLR_TEXT, 12, "Arial Bold");
    MkRect("pill", PANEL_W - 118, 8, 106, 20, CLR_GREY, CLR_GREY);
    MkLabel("pill_t", PANEL_W - 65, 18, "STOPPED", clrWhite, 8, "Arial Bold", ANCHOR_CENTER);
+   MkButton("b_min", PANEL_W - 146, 8, 22, 20, "-", CLR_GREY, clrWhite, 10);
    MkLabel("info", 14, 44, " ", CLR_MUTED, 8);
 
    // Stats grid (2 rows x 3 columns)
@@ -800,8 +842,7 @@ void UpdatePanel()
    SetText("pill_t", status, clrWhite);
 
    SetText("info", "Account " + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "   |   "
-           + AccountInfoString(ACCOUNT_SERVER) + "   |   " + _Symbol + "   |   Magic "
-           + IntegerToString(InpMagic), CLR_MUTED);
+           + AccountInfoString(ACCOUNT_SERVER) + "   |   " + _Symbol, CLR_MUTED);
 
    // Stats
    double spread = CurrentSpread();
