@@ -433,6 +433,10 @@ int OnInit()
      }
    ApplyProfile();
 
+   // MT5 keeps global variables when inputs change, so re-check the lock here
+   if(InpMaxDailyLossPct <= 0 && InpDailyTargetPct <= 0)
+      g_dailyLimitHit = false;
+
    g_state = BOT_STOPPED;
    // Keep RUNNING state only across a timeframe switch or input change,
    // never across a terminal restart (power cut, reboot).
@@ -664,6 +668,16 @@ void CheckConnection()
 
 void CheckDailyLimits()
   {
+   // Both limits switched off: never lock, and clear a lock left from earlier.
+   if(InpMaxDailyLossPct <= 0 && InpDailyTargetPct <= 0)
+     {
+      if(g_dailyLimitHit)
+        {
+         g_dailyLimitHit = false;
+         Msg("Daily limits are off. Lock cleared.", CLR_MUTED);
+        }
+      return;
+     }
    datetime today = iTime(_Symbol, PERIOD_D1, 0);
    if(g_dailyLimitHit && today != 0 && today != g_dailyLimitDay)
      {
