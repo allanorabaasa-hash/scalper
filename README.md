@@ -5,7 +5,27 @@ Runs on Kali Linux through a portable Wine staging build.
 
 > **Status:** Momentum Burst strategy v1. Test in the Strategy Tester and on a **demo account** first.
 
-## Strategy: Momentum Burst
+## Strategy 1 (default): Trend Pullback
+
+Trades with the trend after a pullback, the way discretionary gold scalpers do,
+with the stop where the setup is proven wrong instead of a fixed distance.
+
+1. **Trend** (M15): EMA 50 rising and price above it = uptrend (falling and below = downtrend).
+   No clear trend = no trades.
+2. **Pullback** (M5): within the last 5 bars price dipped back to the EMA 20.
+3. **Resumption**: the last closed M5 bar closes back beyond the EMA 20, in the trend direction,
+   and breaks the previous bar's high (low). Entry at market.
+4. **Stop** beyond the pullback swing plus 0.2 x ATR (skipped if wider than 2 x ATR).
+   **Take profit** 1.5 x risk. **Breakeven** once price is 1 x risk in profit.
+5. **Filters**: quiet markets (ATR < 0.80), spread above 15% of the stop, and the rollover hours
+   (server 21:00-23:00) are skipped. One trade at a time.
+
+Each trade risks a fixed % of balance, so the payoff is: win = +1.5R, loss = -1R.
+It is profitable with a win rate above 40%, before costs.
+
+The panel footer explains what it is waiting for (no trend / waiting for pullback / waiting for resumption).
+
+## Strategy 2: Momentum Burst
 
 No indicators, only raw ticks.
 
@@ -21,7 +41,7 @@ No indicators, only raw ticks.
 
 ### Profiles
 
-Switch with the **MODE** button on the panel (or the *Profile* input). The trade journal records which
+Switch with the strategy button on the panel: PULLBACK -> BURST SAFE -> BALANCED -> AGGRESSIVE -> CUSTOM. The trade journal records which
 profile opened each trade.
 
 | | Safe | Balanced | Aggressive |
