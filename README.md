@@ -19,6 +19,29 @@ No indicators, only raw ticks.
    trailing stop from +0.50 (0.30 behind price), and every trade is closed after 20 s.
 6. **Brakes**: spread filter, cooldown (2 s), max 20 trades/minute, daily loss limit.
 
+### Profiles
+
+Switch with the **MODE** button on the panel (or the *Profile* input). The trade journal records which
+profile opened each trade.
+
+| | Safe | Balanced | Aggressive |
+|---|---|---|---|
+| Burst window | 3.0 s | 2.0 s | 1.5 s |
+| Move needed | 3x spread, min 0.50 | 2.5x spread, min 0.40 | 2x spread, min 0.30 |
+| Min ticks / direction share | 6 / 70% | 5 / 68% | 4 / 65% |
+| Max stack | 2 | 3 | 5 |
+| Cooldown / max per minute | 3 s / 10 | 1 s / 20 | none / 40 |
+| Breakeven / trail start / trail distance | 0.30 / 0.50 / 0.30 | 0.25 / 0.40 / 0.25 | 0.20 / 0.30 / 0.20 |
+| Max hold | 20 s | 15 s | 10 s |
+
+*Custom* uses the values from the inputs.
+
+### Trade journal
+
+Every entry and exit is written to `MQL5/Files/XAUScalper_journal.csv`
+(entry: burst size, spread, tick count, direction share; exit: profit, hold time, exit reason).
+This is the data used to tune the profiles.
+
 The panel footer shows the live burst meter: the current move vs. what is needed to trigger.
 All numbers are inputs, so tune them in the Strategy Tester.
 
