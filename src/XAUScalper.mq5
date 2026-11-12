@@ -41,6 +41,7 @@ input double        InpMaxDailyLossPct   = 3.0;           // Daily loss limit % 
 input double        InpDailyTargetPct    = 0.0;           // Daily profit target % (0 = off)
 
 input group "Session (PC local time)"
+input bool          InpUseSession        = false;         // Limit trading to session hours (false = trade any time)
 input int           InpStartHour         = 10;            // Session start hour
 input int           InpStartMinute       = 0;             // Session start minute
 input int           InpEndHour           = 19;            // Session end hour
@@ -277,6 +278,8 @@ void DoManual(const int dir)
 //==================================================================
 bool SessionOpen()
   {
+   if(!InpUseSession)
+      return true;
    MqlDateTime t;
    TimeToStruct(TimeLocal(), t);
    int now   = t.hour * 60 + t.min;
@@ -854,7 +857,10 @@ void UpdatePanel()
    SetText("s_v3", Signed(g_floating), PLColor(g_floating));
    SetText("s_v4", DoubleToString(spread, _Digits),
            (InpMaxSpread > 0 && spread > InpMaxSpread) ? CLR_RED : CLR_TEXT);
-   SetText("s_v5", (sOpen ? "OPEN " : "CLOSED ") + sess, sOpen ? CLR_GREEN : CLR_MUTED);
+   if(!InpUseSession)
+      SetText("s_v5", "24H (no limit)", CLR_GREEN);
+   else
+      SetText("s_v5", (sOpen ? "OPEN " : "CLOSED ") + sess, sOpen ? CLR_GREEN : CLR_MUTED);
 
    // Positions table
    int row = 0, total = 0;

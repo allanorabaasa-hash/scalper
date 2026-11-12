@@ -37,7 +37,7 @@ Status: `STOPPED`, `RUNNING`, `PAUSED` (after a connection drop), `LOCKED` (dail
 ## Safety built in
 
 - Every order is sent **with a stop loss** (the broker holds it, so it works even if the PC is off).
-- **Session hours** in PC local time (default 10:00–19:00). Optionally closes everything at session end.
+- Trades **any time** by default. Optional session hours (PC local time) with close-at-session-end.
 - **Daily loss limit** (default 3%) and optional daily profit target: closes all, stops, locks until the next day.
 - **Spread filter**, **max open positions**, **cooldown** between trades.
 - **Connection drop**: no trades while offline; after reconnecting the bot goes to `PAUSED` until you press START.
@@ -77,7 +77,7 @@ in the evening press STOP (the EA also closes at session end), then `./scripts/s
 | Take profit distance | 2.00 | 0 = none |
 | Max spread | 0.35 | In price; skips trades when wider |
 | Max daily loss % | 3.0 | 0 = off |
-| Session | 10:00–19:00 | PC local time |
+| Use session | false | true = only trade between the session hours (PC local time) |
 | Magic number | 20261112 | Use a different one per EA/chart if running more than one |
 
 Only positions opened by this EA (same symbol + magic number) appear in the panel and are counted.
