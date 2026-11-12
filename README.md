@@ -5,7 +5,18 @@ Runs on Kali Linux through a portable Wine staging build.
 
 > **Status:** Momentum Burst strategy v1. Test in the Strategy Tester and on a **demo account** first.
 
-## Strategy 1 (default): Trend Pullback
+## Strategy 1 (default): Continuous
+
+Always in the market.
+
+- Whenever fewer trades are open than allowed, it opens a new one (1 s apart) in the
+  direction price moved over the last 5 seconds.
+- Every trade: **SL $1.00, TP $2.00**. Nothing else closes it: no time stop, no early cut.
+- **Max open trades = 0.1% of equity** (5,000 equity -> 5 trades; never fewer than 1).
+- **Lot size is set on the panel**: type it in the LOT box or use the - / + buttons.
+  The bot remembers it.
+
+## Strategy 2: Trend Pullback
 
 Trades with the trend after a pullback, the way discretionary gold scalpers do,
 with the stop where the setup is proven wrong instead of a fixed distance.
@@ -25,7 +36,7 @@ It is profitable with a win rate above 40%, before costs.
 
 The panel footer explains what it is waiting for (no trend / waiting for pullback / waiting for resumption).
 
-## Strategy 2: Momentum Burst
+## Strategy 3: Momentum Burst
 
 No indicators, only raw ticks.
 
@@ -41,7 +52,7 @@ No indicators, only raw ticks.
 
 ### Profiles
 
-Switch with the strategy button on the panel: PULLBACK -> BURST SAFE -> BALANCED -> AGGRESSIVE -> CUSTOM.
+Switch with the strategy button on the panel: CONTINUOUS -> PULLBACK -> BURST SAFE -> BALANCED -> AGGRESSIVE -> CUSTOM.
 
 Exits follow **cut losers fast, let winners run**: a loser is closed at a small loss
 (never less than 2x spread), a trade that is not winning after N seconds is closed,

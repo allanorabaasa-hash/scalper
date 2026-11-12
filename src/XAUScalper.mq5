@@ -4,9 +4,9 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "2.10"
+#property version   "3.00"
 #property description "XAUUSD scalper with an on-chart control panel."
-#property description "Strategies: Trend Pullback (default) and Momentum Burst."
+#property description "Strategies: Continuous (default), Trend Pullback and Momentum Burst."
 
 #include <Trade\Trade.mqh>
 
@@ -26,11 +26,19 @@ input string        InpTradeComment      = "XAUScalper";  // Order comment
 enum ENUM_STRATEGY
   {
    STRAT_PULLBACK = 0,   // Trend Pullback (recommended)
-   STRAT_BURST    = 1    // Momentum Burst (tick scalper)
+   STRAT_BURST    = 1,   // Momentum Burst (tick scalper)
+   STRAT_CONTINUOUS = 2  // Continuous: always in the market, SL 1 / TP 2
   };
 
 input group "Strategy"
-input ENUM_STRATEGY InpStrategy          = STRAT_PULLBACK; // Strategy (can also be switched on the panel)
+input ENUM_STRATEGY InpStrategy          = STRAT_CONTINUOUS; // Strategy (can also be switched on the panel)
+
+input group "Continuous strategy"
+input double        InpCT_StopLoss       = 1.00;          // Stop loss (price distance, 1.00 = $1 move)
+input double        InpCT_TakeProfit     = 2.00;          // Take profit (price distance)
+input double        InpCT_MaxOpenPctEq   = 0.1;           // Max open trades = this % of equity (min 1)
+input int           InpCT_DirWindowMs    = 5000;          // Direction = price move over this window (ms)
+input int           InpCT_EntrySpacingSec= 1;             // Seconds between new entries
 
 input group "Trend Pullback strategy"
 input ENUM_TIMEFRAMES InpPB_EntryTF      = PERIOD_M5;     // Entry timeframe
@@ -51,8 +59,8 @@ input int           InpPB_SkipFromHour   = 21;            // No new trades from 
 input int           InpPB_SkipToHour     = 23;            // ...until server hour
 
 input group "Position sizing"
-input ENUM_LOT_MODE InpLotMode           = LOT_RISK_PERCENT; // Lot mode
-input double        InpFixedLots         = 0.01;          // Fixed lots (if Lot mode = Fixed)
+input ENUM_LOT_MODE InpLotMode           = LOT_FIXED;     // Lot mode (Fixed = set on the panel)
+input double        InpFixedLots         = 0.01;          // Starting lot size (change it on the panel)
 input double        InpRiskPercent       = 1.0;           // Risk % per trade (if Lot mode = Risk %)
 input double        InpMaxRiskAtMinLot   = 5.0;           // Small accounts: allow min lot if its risk <= this % (0 = never)
 input double        InpMarginBuffer      = 50.0;          // Keep at least this % of free margin unused
@@ -171,7 +179,9 @@ struct StrategyParams
   };
 StrategyParams g_p;
 ENUM_PROFILE   g_profile = PROFILE_BALANCED;
-ENUM_STRATEGY  g_strategy = STRAT_PULLBACK;
+ENUM_STRATEGY  g_strategy = STRAT_CONTINUOUS;
+double         g_lots      = 0.01;        // lot size set on the panel
+string         g_ctStatus  = "starting";
 int            g_hTrendEMA = INVALID_HANDLE;
 int            g_hPullEMA  = INVALID_HANDLE;
 int            g_hATR      = INVALID_HANDLE;
@@ -674,9 +684,76 @@ void ManagePullback()
      }
   }
 
+//==================================================================
+//  STRATEGY: CONTINUOUS
+//==================================================================
+// Always in the market: whenever fewer than the allowed number of trades are open,
+// open a new one in the direction price has moved over the last few seconds.
+// Every trade has a fixed SL and TP (default $1 / $2) and nothing else closes it.
+
+int MaxOpenFromEquity()
+  {
+   int n = (int)MathFloor(AccountInfoDouble(ACCOUNT_EQUITY) * InpCT_MaxOpenPctEq / 100.0);
+   return (n < 1) ? 1 : n;
+  }
+
+// +1 buy / -1 sell: the way price moved over the direction window,
+// falling back to the last closed M1 candle when price has not moved.
+int MomentumDir()
+  {
+   MqlTick now;
+   if(SymbolInfoTick(_Symbol, now))
+     {
+      ulong to   = (ulong)now.time_msc;
+      ulong from = (to > (ulong)InpCT_DirWindowMs) ? to - (ulong)InpCT_DirWindowMs : 0;
+      MqlTick ticks[];
+      int n = CopyTicksRange(_Symbol, ticks, COPY_TICKS_INFO, from, to);
+      if(n >= 2)
+        {
+         double move = ticks[n - 1].bid - ticks[0].bid;
+         if(move > 0)
+            return 1;
+         if(move < 0)
+            return -1;
+        }
+     }
+   double o = iOpen(_Symbol, PERIOD_M1, 1);
+   double c = iClose(_Symbol, PERIOD_M1, 1);
+   return (c >= o) ? 1 : -1;
+  }
+
+void RunContinuous()
+  {
+   int maxOpen = MaxOpenFromEquity();
+   int open    = CountOurPositions();
+   if(open >= maxOpen)
+     {
+      g_ctStatus = StringFormat("%d/%d trades open, waiting for one to close", open, maxOpen);
+      return;
+     }
+   string why = BlockReasonBase();
+   if(why != "")
+     {
+      g_ctStatus = "waiting: " + why;
+      return;
+     }
+   if(TimeCurrent() - g_lastTradeTime < InpCT_EntrySpacingSec)
+      return;
+
+   int dir = MomentumDir();
+   g_ctStatus = StringFormat("%d/%d open, opening %s", open, maxOpen, dir > 0 ? "BUY" : "SELL");
+   g_lastMove = InpCT_StopLoss;
+   g_lastNeed = InpCT_TakeProfit;
+   g_lastRatio = 0.0;
+   g_lastTicks = 0;
+   OpenTradeEx(dir, "CONT", InpCT_StopLoss, InpCT_TakeProfit);
+  }
+
 void RunStrategy()
   {
-   if(g_strategy == STRAT_BURST)
+   if(g_strategy == STRAT_CONTINUOUS)
+      RunContinuous();
+   else if(g_strategy == STRAT_BURST)
       RunBurst();
    else
       RunPullback();
@@ -686,12 +763,15 @@ void ManagePositions()
   {
    if(g_strategy == STRAT_BURST)
       ManageBurst();
-   else
+   else if(g_strategy == STRAT_PULLBACK)
       ManagePullback();
+   // Continuous: trades are closed only by their own SL / TP
   }
 
 string StrategyLabel()
   {
+   if(g_strategy == STRAT_CONTINUOUS)
+      return "STRATEGY: CONTINUOUS";
    if(g_strategy == STRAT_PULLBACK)
       return "STRATEGY: PULLBACK";
    return "BURST: " + ProfileName(g_profile);
@@ -739,6 +819,11 @@ int OnInit()
    ApplyProfile();
 
    g_strategy = InpStrategy;
+   if(!MQLInfoInteger(MQL_TESTER) && GlobalVariableCheck(StateKey() + "_lots"))
+      g_lots = GlobalVariableGet(StateKey() + "_lots");
+   else
+      g_lots = InpFixedLots;
+   g_lots = NormalizeLots(g_lots);
    string skey = StateKey() + "_s";
    if(GlobalVariableCheck(skey))
      {
@@ -825,9 +910,15 @@ void OnTimer()
 
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
   {
+   if(id == CHARTEVENT_OBJECT_ENDEDIT && sparam == P("e_lot"))
+     {
+      ChangeLots(StringToDouble(ObjectGetString(0, sparam, OBJPROP_TEXT)));
+      UpdatePanel();
+      return;
+     }
    if(id != CHARTEVENT_OBJECT_CLICK)
       return;
-   if(StringFind(sparam, PREFIX) != 0)
+   if(StringFind(sparam, PREFIX) != 0 || sparam == P("e_lot"))
       return;
 
    ObjectSetInteger(0, sparam, OBJPROP_STATE, false);
@@ -838,20 +929,29 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
       DoStop();
    else if(sparam == P("b_close"))
       DoCloseAll();
+   else if(sparam == P("b_lminus") || sparam == P("b_lplus"))
+     {
+      double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+      if(step <= 0)
+         step = 0.01;
+      ChangeLots(g_lots + (sparam == P("b_lplus") ? step : -step));
+     }
    else if(sparam == P("b_buy"))
       DoManual(1);
    else if(sparam == P("b_sell"))
       DoManual(-1);
    else if(sparam == P("b_mode"))
      {
-      // PULLBACK -> BURST SAFE -> BALANCED -> AGGRESSIVE -> CUSTOM -> PULLBACK
-      if(g_strategy == STRAT_PULLBACK)
+      // CONTINUOUS -> PULLBACK -> BURST SAFE -> BALANCED -> AGGRESSIVE -> CUSTOM -> CONTINUOUS
+      if(g_strategy == STRAT_CONTINUOUS)
+         g_strategy = STRAT_PULLBACK;
+      else if(g_strategy == STRAT_PULLBACK)
         {
          g_strategy = STRAT_BURST;
          g_profile  = PROFILE_SAFE;
         }
       else if(g_profile == PROFILE_CUSTOM)
-         g_strategy = STRAT_PULLBACK;
+         g_strategy = STRAT_CONTINUOUS;
       else
          g_profile = (ENUM_PROFILE)((int)g_profile + 1);
       ApplyProfile();
@@ -921,7 +1021,10 @@ void DoManual(const int dir)
       Msg("No connection to the broker.", CLR_RED);
       return;
      }
-   OpenTrade(dir, "MANUAL");
+   if(g_strategy == STRAT_CONTINUOUS)
+      OpenTradeEx(dir, "MANUAL", InpCT_StopLoss, InpCT_TakeProfit);
+   else
+      OpenTrade(dir, "MANUAL");
   }
 
 //==================================================================
@@ -952,7 +1055,8 @@ double CurrentSpread()
   }
 
 // Empty string = allowed to open a new trade, otherwise the reason it is blocked.
-string BlockReason()
+// Checks that apply to every strategy (connection, permissions, market, limits, spread).
+string BlockReasonBase()
   {
    if(!TerminalInfoInteger(TERMINAL_CONNECTED))
       return "no connection to broker";
@@ -971,6 +1075,14 @@ string BlockReason()
    double spread = CurrentSpread();
    if(InpMaxSpread > 0 && spread > InpMaxSpread)
       return StringFormat("spread %s > max %s", DoubleToString(spread, _Digits), DoubleToString(InpMaxSpread, _Digits));
+   return "";
+  }
+
+string BlockReason()
+  {
+   string base = BlockReasonBase();
+   if(base != "")
+      return base;
    if(CountOurPositions() >= g_p.maxPositions)
       return "max open positions reached";
    if(TimeCurrent() - g_lastTradeTime < g_p.cooldownSec)
@@ -1072,13 +1184,37 @@ int VolumeDigits(double step)
    return d;
   }
 
+// Round a lot size to the broker's step and clamp it to min/max.
+double NormalizeLots(double lots)
+  {
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double step   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(step > 0)
+      lots = MathRound(lots / step) * step;
+   if(minLot > 0 && lots < minLot)
+      lots = minLot;
+   if(maxLot > 0 && lots > maxLot)
+      lots = maxLot;
+   return NormalizeDouble(lots, VolumeDigits(step > 0 ? step : 0.01));
+  }
+
+void ChangeLots(const double newLots)
+  {
+   g_lots = NormalizeLots(newLots);
+   ObjectSetString(0, P("e_lot"), OBJPROP_TEXT, DoubleToString(g_lots, 2));
+   if(!MQLInfoInteger(MQL_TESTER))
+      GlobalVariableSet(StateKey() + "_lots", g_lots);
+   Msg("Lot size set to " + DoubleToString(g_lots, 2), CLR_BLUE);
+  }
+
 // Returns 0 if a valid lot size cannot be produced.
 double CalcLots(const double slDistance)
   {
    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
    double step   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   double lots   = InpFixedLots;
+   double lots   = g_lots;
 
    if(InpLotMode == LOT_RISK_PERCENT)
      {
@@ -1613,13 +1749,37 @@ void BuildPanel()
 
    // Buttons
    MkRect("sep1", 12, 148, PANEL_W - 24, 1, CLR_BORDER, CLR_BORDER);
-   MkButton("b_start", 12,  158, 110, 32, "START",     CLR_GREEN, clrWhite, 10);
-   MkButton("b_stop",  130, 158, 110, 32, "STOP",      CLR_RED,   clrWhite, 10);
-   MkButton("b_close", 248, 158, 110, 32, "CLOSE ALL", CLR_GREY,  clrWhite, 9);
+   MkButton("b_start", 12,  158, 90, 32, "START",     CLR_GREEN, clrWhite, 10);
+   MkButton("b_stop",  108, 158, 90, 32, "STOP",      CLR_RED,   clrWhite, 10);
+   MkButton("b_close", 204, 158, 96, 32, "CLOSE ALL", CLR_GREY,  clrWhite, 9);
+
+   // Lot size control:  [-] [ 0.01 ] [+]
+   MkLabel("l_lot", 357, 151, "LOT", CLR_MUTED, 7, "Arial", ANCHOR_UPPER);
+   MkButton("b_lminus", 308, 162, 22, 26, "-", CLR_GREY, clrWhite, 10);
+   string eo = P("e_lot");
+   if(ObjectFind(0, eo) < 0)
+      ObjectCreate(0, eo, OBJ_EDIT, 0, 0, 0);
+   ObjectSetInteger(0, eo, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, eo, OBJPROP_XDISTANCE, InpPanelX + 332);
+   ObjectSetInteger(0, eo, OBJPROP_YDISTANCE, InpPanelY + 162);
+   ObjectSetInteger(0, eo, OBJPROP_XSIZE, 50);
+   ObjectSetInteger(0, eo, OBJPROP_YSIZE, 26);
+   ObjectSetInteger(0, eo, OBJPROP_ALIGN, ALIGN_CENTER);
+   ObjectSetInteger(0, eo, OBJPROP_BGCOLOR, CLR_HEADER);
+   ObjectSetInteger(0, eo, OBJPROP_BORDER_COLOR, CLR_BORDER);
+   ObjectSetInteger(0, eo, OBJPROP_COLOR, CLR_TEXT);
+   ObjectSetString(0, eo, OBJPROP_FONT, "Arial Bold");
+   ObjectSetInteger(0, eo, OBJPROP_FONTSIZE, 10);
+   ObjectSetString(0, eo, OBJPROP_TEXT, DoubleToString(g_lots, 2));
+   ObjectSetInteger(0, eo, OBJPROP_READONLY, false);
+   ObjectSetInteger(0, eo, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, eo, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, eo, OBJPROP_ZORDER, 10);
+   MkButton("b_lplus", 384, 162, 22, 26, "+", CLR_GREY, clrWhite, 10);
    if(InpShowManualButtons)
      {
-      MkButton("b_buy",  382, 158, 70, 32, "BUY",  CLR_BLUE, clrWhite, 9);
-      MkButton("b_sell", 458, 158, 70, 32, "SELL", CLR_BLUE, clrWhite, 9);
+      MkButton("b_buy",  414, 158, 55, 32, "BUY",  CLR_BLUE, clrWhite, 9);
+      MkButton("b_sell", 473, 158, 55, 32, "SELL", CLR_BLUE, clrWhite, 9);
      }
 
    // Positions table
@@ -1690,7 +1850,8 @@ void UpdatePanel()
 
    // Profile button
    color modeClr = CLR_GREY;
-   if(g_strategy == STRAT_PULLBACK)         modeClr = CLR_BLUE;
+   if(g_strategy == STRAT_CONTINUOUS)       modeClr = CLR_GREEN;
+   else if(g_strategy == STRAT_PULLBACK)    modeClr = CLR_BLUE;
    else if(g_profile == PROFILE_AGGRESSIVE) modeClr = CLR_RED;
    ObjectSetString(0, P("b_mode"), OBJPROP_TEXT, StrategyLabel());
    ObjectSetInteger(0, P("b_mode"), OBJPROP_BGCOLOR, modeClr);
@@ -1744,7 +1905,9 @@ void UpdatePanel()
      {
       string why = BlockReason();
       bool soft = (why == "" || why == "max open positions reached" || why == "cooldown after last trade");
-      if(g_strategy == STRAT_PULLBACK)
+      if(g_strategy == STRAT_CONTINUOUS)
+         cond = "Continuous: " + g_ctStatus;
+      else if(g_strategy == STRAT_PULLBACK)
          cond = soft ? "Pullback: " + g_pbStatus : "Waiting: " + why;
       else if(soft)
          cond = StringFormat("Scanning: %ss move %s%s (need %s)", DoubleToString(g_p.windowMs / 1000.0, 1),
