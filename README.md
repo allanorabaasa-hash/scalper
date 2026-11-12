@@ -87,12 +87,27 @@ In MT5:
 Daily routine: `./scripts/start.sh` in the morning, press START on each panel;
 in the evening press STOP (the EA also closes at session end), then `./scripts/stop.sh`.
 
+## Small accounts ($10 and up)
+
+Use an **Exness Standard Cent** account (gold symbol usually `XAUUSDc`). Balances are in
+US cents, so $10 shows as 1,000 USC and the minimum lot is 100x smaller than on a
+Standard account. On a Standard account the minimum 0.01 lot loses $1.50 per stop-out,
+which is 15% of a $10 account.
+
+The EA protects small accounts by:
+- sizing every trade from **Risk %** of balance (default 1%),
+- using the minimum lot only if its risk stays under **5%**, otherwise skipping the trade,
+- never using more than half the free margin,
+- the daily loss limit.
+
 ## Key inputs
 
 | Input | Default | Meaning |
 |---|---|---|
 | Lot mode | Risk % | Fixed lots, or size by % of balance |
-| Risk % per trade | 0.5 | Used in Risk % mode |
+| Risk % per trade | 1.0 | Used in Risk % mode |
+| Max risk at min lot | 5.0 | Small accounts: min lot allowed only up to this risk |
+| Margin buffer | 50 | % of free margin always kept unused |
 | Stop loss distance | 2.00 | Price distance (2.00 = $2 move in gold) |
 | Take profit distance | 2.00 | 0 = none |
 | Max spread | 0.35 | In price; skips trades when wider |

@@ -24,9 +24,11 @@ input long          InpMagic             = 20261112;      // Magic number (uniqu
 input string        InpTradeComment      = "XAUScalper";  // Order comment
 
 input group "Position sizing"
-input ENUM_LOT_MODE InpLotMode           = LOT_FIXED;     // Lot mode
+input ENUM_LOT_MODE InpLotMode           = LOT_RISK_PERCENT; // Lot mode
 input double        InpFixedLots         = 0.01;          // Fixed lots (if Lot mode = Fixed)
-input double        InpRiskPercent       = 0.5;           // Risk % per trade (if Lot mode = Risk %)
+input double        InpRiskPercent       = 1.0;           // Risk % per trade (if Lot mode = Risk %)
+input double        InpMaxRiskAtMinLot   = 5.0;           // Small accounts: allow min lot if its risk <= this % (0 = never)
+input double        InpMarginBuffer      = 50.0;          // Keep at least this % of free margin unused
 
 input group "Stops (price distance: 2.00 = a $2 move in gold)"
 input double        InpStopLoss          = 1.50;          // Hard stop loss distance (required)
@@ -648,7 +650,23 @@ double CalcLots(const double slDistance)
    if(step > 0)
       lots = MathFloor(lots / step + 1e-9) * step;
    if(lots < minLot)
-      return 0.0;   // never round UP past the risk limit
+     {
+      // Small account: the minimum lot risks more than Risk %. Allow it only
+      // while that risk stays within InpMaxRiskAtMinLot.
+      if(InpLotMode != LOT_RISK_PERCENT || InpMaxRiskAtMinLot <= 0)
+         return 0.0;
+      double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+      double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE_LOSS);
+      if(tickValue <= 0)
+         tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+      double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+      if(tickSize <= 0 || tickValue <= 0 || balance <= 0)
+         return 0.0;
+      double riskAtMin = slDistance / tickSize * tickValue * minLot / balance * 100.0;
+      if(riskAtMin > InpMaxRiskAtMinLot)
+         return 0.0;
+      lots = minLot;
+     }
    if(lots > maxLot)
       lots = maxLot;
    return NormalizeDouble(lots, VolumeDigits(step));
@@ -678,7 +696,18 @@ bool OpenTrade(const int dir, const string tag)
    double lots = CalcLots(slDist);
    if(lots <= 0)
      {
-      Msg("Lot below broker minimum for this risk. Trade skipped.", CLR_AMBER);
+      Msg("Too small for min lot at this SL. Use a Cent account.", CLR_AMBER);
+      return false;
+     }
+
+   // Margin check: never use more than (100 - buffer)% of free margin
+   double margin = 0.0;
+   ENUM_ORDER_TYPE otype = (dir > 0) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   double refPrice = (dir > 0) ? tick.ask : tick.bid;
+   if(OrderCalcMargin(otype, _Symbol, lots, refPrice, margin)
+      && margin > AccountInfoDouble(ACCOUNT_MARGIN_FREE) * (100.0 - InpMarginBuffer) / 100.0)
+     {
+      Msg("Not enough free margin for another trade. Skipped.", CLR_AMBER);
       return false;
      }
 
