@@ -4,9 +4,9 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "1.00"
+#property version   "1.10"
 #property description "XAUUSD scalper with an on-chart control panel."
-#property description "Strategy logic lives in GetSignal() and is a placeholder for now."
+#property description "Strategy: Momentum Burst. Enters on fast one-way tick moves, stacks winners, exits fast."
 
 #include <Trade\Trade.mqh>
 
@@ -24,21 +24,38 @@ input long          InpMagic             = 20261112;      // Magic number (uniqu
 input string        InpTradeComment      = "XAUScalper";  // Order comment
 
 input group "Position sizing"
-input ENUM_LOT_MODE InpLotMode           = LOT_RISK_PERCENT; // Lot mode
+input ENUM_LOT_MODE InpLotMode           = LOT_FIXED;     // Lot mode
 input double        InpFixedLots         = 0.01;          // Fixed lots (if Lot mode = Fixed)
 input double        InpRiskPercent       = 0.5;           // Risk % per trade (if Lot mode = Risk %)
 
 input group "Stops (price distance: 2.00 = a $2 move in gold)"
-input double        InpStopLoss          = 2.00;          // Stop loss distance (required)
-input double        InpTakeProfit        = 2.00;          // Take profit distance (0 = none)
+input double        InpStopLoss          = 1.50;          // Hard stop loss distance (required)
+input double        InpTakeProfit        = 1.50;          // Take profit distance (0 = none)
 
 input group "Filters and limits"
 input double        InpMaxSpread         = 0.35;          // Max spread in price (0 = off)
-input int           InpMaxPositions      = 1;             // Max open positions at once
-input int           InpCooldownSec       = 60;            // Seconds between new trades
+input int           InpMaxPositions      = 3;             // Max open positions at once
+input int           InpCooldownSec       = 2;             // Seconds between new trades
+input int           InpMaxTradesPerMin   = 20;            // Max new trades per minute (0 = off)
 input int           InpSlippagePoints    = 30;            // Max slippage (points)
-input double        InpMaxDailyLossPct   = 3.0;           // Daily loss limit % (0 = off)
+input double        InpMaxDailyLossPct   = 5.0;           // Daily loss limit % (0 = off)
 input double        InpDailyTargetPct    = 0.0;           // Daily profit target % (0 = off)
+
+input group "Momentum burst strategy"
+input int           InpBurstWindowMs     = 3000;          // Burst window (milliseconds)
+input double        InpBurstSpreadMult   = 3.0;           // Burst must move at least N x spread
+input double        InpBurstMinMove      = 0.50;          // ...and at least this price distance
+input int           InpBurstMinTicks     = 6;             // Min price changes inside the window
+input double        InpBurstDirRatio     = 0.70;          // Share of ticks in the burst direction (0.5-1)
+input int           InpMaxStack          = 3;             // Max positions stacked in one direction
+input double        InpStackStep         = 0.30;          // Add only when newest position is up this much
+input bool          InpReverseOnBurst    = true;          // Opposite burst: close all and reverse
+input double        InpBreakEvenTrigger  = 0.30;          // Move SL to breakeven at this profit (0 = off)
+input double        InpBreakEvenLock     = 0.05;          // Profit locked at breakeven
+input double        InpTrailStart        = 0.50;          // Start trailing at this profit (0 = off)
+input double        InpTrailDistance     = 0.30;          // Trailing distance behind price
+input double        InpTrailStep         = 0.05;          // Min SL move before modifying
+input int           InpMaxHoldSec        = 20;            // Close any trade after N seconds (0 = off)
 
 input group "Session (PC local time)"
 input bool          InpUseSession        = false;         // Limit trading to session hours (false = trade any time)
@@ -83,6 +100,9 @@ string         g_lastMsg         = "Ready. Press START to begin.";
 color          g_lastMsgColor    = clrSilver;
 ulong          g_rowTicket[MAX_ROWS];
 bool           g_collapsed       = false;
+datetime       g_openTimes[];                 // entry times, for the trades-per-minute limit
+double         g_lastMove        = 0.0;       // last measured burst move (for the panel)
+double         g_lastNeed        = 0.0;       // move required to trigger
 
 //--- Panel colours
 const color CLR_BG      = C'22,27,34';
@@ -104,14 +124,208 @@ const color CLR_BLUE    = C'31,111,235';
 #define ROW_H    22
 
 //==================================================================
-//  STRATEGY  (to be designed together)
+//  STRATEGY: MOMENTUM BURST
 //==================================================================
-// Return +1 to BUY, -1 to SELL, 0 for no trade.
-// Called on every tick while the bot is RUNNING and every safety check
-// has passed (connection, session, spread, daily limit, max positions, cooldown).
-int GetSignal()
+// 1. Watch raw ticks. A burst = price moved at least max(N x spread, min move)
+//    within the window, with most ticks pointing the same way.
+// 2. Enter in the burst direction. Stack more positions only while the newest
+//    one is already in profit (never add to a loser).
+// 3. Opposite burst: close everything and reverse.
+// 4. Exits: hard SL on every order, breakeven, trailing stop, max hold time.
+
+ulong NowMsc()
   {
-   return 0;   // placeholder: no automatic trades yet
+   MqlTick tick;
+   ulong t = 0;
+   if(SymbolInfoTick(_Symbol, tick))
+      t = (ulong)tick.time_msc;
+   ulong srv = (ulong)TimeTradeServer() * 1000;
+   return (t > srv ? t : srv);
+  }
+
+// +1 = up burst, -1 = down burst, 0 = none
+int BurstDirection()
+  {
+   MqlTick now;
+   if(!SymbolInfoTick(_Symbol, now))
+      return 0;
+
+   ulong to   = (ulong)now.time_msc;
+   ulong from = (to > (ulong)InpBurstWindowMs) ? to - (ulong)InpBurstWindowMs : 0;
+   MqlTick ticks[];
+   int n = CopyTicksRange(_Symbol, ticks, COPY_TICKS_INFO, from, to);
+   if(n < 2)
+      return 0;
+
+   int up = 0, down = 0;
+   for(int i = 1; i < n; i++)
+     {
+      double d = ticks[i].bid - ticks[i - 1].bid;
+      if(d > 0)
+         up++;
+      else if(d < 0)
+         down++;
+     }
+   int changes = up + down;
+   double spread = now.ask - now.bid;
+   g_lastMove = ticks[n - 1].bid - ticks[0].bid;
+   g_lastNeed = MathMax(InpBurstMinMove, InpBurstSpreadMult * spread);
+
+   if(changes < InpBurstMinTicks)
+      return 0;
+   if(g_lastMove >= g_lastNeed && (double)up / changes >= InpBurstDirRatio)
+      return 1;
+   if(-g_lastMove >= g_lastNeed && (double)down / changes >= InpBurstDirRatio)
+      return -1;
+   return 0;
+  }
+
+// Our positions in one direction: count, and profit (price distance) of the newest.
+void SideInfo(const int dir, int &count, double &newestProfit)
+  {
+   count = 0;
+   newestProfit = 0.0;
+   long newestTime = 0;
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick))
+      return;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(PositionGetTicket(i) == 0 || !IsOurs())
+         continue;
+      bool isBuy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      if((dir > 0) != isBuy)
+         continue;
+      count++;
+      long t = PositionGetInteger(POSITION_TIME_MSC);
+      if(t > newestTime)
+        {
+         newestTime = t;
+         double open = PositionGetDouble(POSITION_PRICE_OPEN);
+         newestProfit = isBuy ? tick.bid - open : open - tick.ask;
+        }
+     }
+  }
+
+void CloseSide(const int dir)
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !IsOurs())
+         continue;
+      bool isBuy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      if((dir > 0) == isBuy)
+         g_trade.PositionClose(ticket, InpSlippagePoints);
+     }
+  }
+
+void RunStrategy()
+  {
+   int dir = BurstDirection();
+   if(dir == 0)
+      return;
+
+   int oppCount, sameCount;
+   double oppProfit, sameProfit;
+   SideInfo(-dir, oppCount, oppProfit);
+   if(oppCount > 0)
+     {
+      if(!InpReverseOnBurst)
+         return;
+      CloseSide(-dir);
+      Msg(StringFormat("Reverse: closed %d %s position(s)", oppCount, dir > 0 ? "SELL" : "BUY"), CLR_AMBER);
+     }
+
+   SideInfo(dir, sameCount, sameProfit);
+   if(sameCount >= InpMaxStack)
+      return;
+   if(sameCount > 0 && sameProfit < InpStackStep)
+      return;   // only add to a position that is already winning
+   if(BlockReason() != "")
+      return;
+
+   OpenTrade(dir, sameCount > 0 ? "STACK" : "BURST");
+  }
+
+// Breakeven, trailing stop and max hold time for every open position of this EA.
+void ManagePositions()
+  {
+   if(!TerminalInfoInteger(TERMINAL_CONNECTED))
+      return;
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick))
+      return;
+
+   int    digits   = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   double point    = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double stopsLvl = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
+   ulong  nowMsc   = NowMsc();
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !IsOurs())
+         continue;
+
+      bool   isBuy  = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      double open   = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl     = PositionGetDouble(POSITION_SL);
+      double tp     = PositionGetDouble(POSITION_TP);
+      ulong  openMs = (ulong)PositionGetInteger(POSITION_TIME_MSC);
+      double profit = isBuy ? tick.bid - open : open - tick.ask;
+
+      // Max hold time
+      if(InpMaxHoldSec > 0 && nowMsc > openMs && nowMsc - openMs >= (ulong)InpMaxHoldSec * 1000)
+        {
+         g_trade.PositionClose(ticket, InpSlippagePoints);
+         continue;
+        }
+
+      double newSL = sl;
+
+      // Breakeven
+      if(InpBreakEvenTrigger > 0 && profit >= InpBreakEvenTrigger)
+        {
+         double be = isBuy ? open + InpBreakEvenLock : open - InpBreakEvenLock;
+         if(isBuy && (newSL == 0 || be > newSL))
+            newSL = be;
+         if(!isBuy && (newSL == 0 || be < newSL))
+            newSL = be;
+        }
+
+      // Trailing stop
+      if(InpTrailStart > 0 && profit >= InpTrailStart)
+        {
+         double trail = isBuy ? tick.bid - InpTrailDistance : tick.ask + InpTrailDistance;
+         if(isBuy && (newSL == 0 || trail > newSL))
+            newSL = trail;
+         if(!isBuy && (newSL == 0 || trail < newSL))
+            newSL = trail;
+        }
+
+      newSL = NormalizeDouble(newSL, digits);
+      if(newSL == sl || MathAbs(newSL - sl) < InpTrailStep)
+         continue;
+      // respect the broker's minimum stop distance
+      if(isBuy && newSL > tick.bid - stopsLvl)
+         continue;
+      if(!isBuy && newSL < tick.ask + stopsLvl)
+         continue;
+      g_trade.PositionModify(ticket, newSL, tp);
+     }
+  }
+
+int TradesLastMinute()
+  {
+   datetime cutoff = TimeCurrent() - 60;
+   int kept = 0;
+   int n = ArraySize(g_openTimes);
+   for(int i = 0; i < n; i++)
+      if(g_openTimes[i] >= cutoff)
+         g_openTimes[kept++] = g_openTimes[i];
+   ArrayResize(g_openTimes, kept);
+   return kept;
   }
 
 //==================================================================
@@ -144,6 +358,9 @@ int OnInit()
       GlobalVariableDel(key);
      }
 
+   if(MQLInfoInteger(MQL_TESTER))
+      g_state = BOT_RUNNING;   // no START button to press in the Strategy Tester
+
    g_wasConnected    = (bool)TerminalInfoInteger(TERMINAL_CONNECTED);
    g_prevSessionOpen = SessionOpen();
 
@@ -169,19 +386,15 @@ void OnDeinit(const int reason)
 
 void OnTick()
   {
-   if(g_state != BOT_RUNNING)
-      return;
-   if(BlockReason() != "")
-      return;
-
-   int signal = GetSignal();
-   if(signal != 0)
-      OpenTrade(signal, "AUTO");
+   ManagePositions();          // runs even when stopped, so open trades stay managed
+   if(g_state == BOT_RUNNING)
+      RunStrategy();
   }
 
 void OnTimer()
   {
    CheckConnection();
+   ManagePositions();
    RefreshStats();
    CheckDailyLimits();
    CheckSessionEnd();
@@ -324,6 +537,8 @@ string BlockReason()
       return "max open positions reached";
    if(TimeCurrent() - g_lastTradeTime < InpCooldownSec)
       return "cooldown after last trade";
+   if(InpMaxTradesPerMin > 0 && TradesLastMinute() >= InpMaxTradesPerMin)
+      return "max trades per minute reached";
    return "";
   }
 
@@ -488,6 +703,9 @@ bool OpenTrade(const int dir, const string tag)
    if(sent && (rc == TRADE_RETCODE_DONE || rc == TRADE_RETCODE_PLACED))
      {
       g_lastTradeTime = TimeCurrent();
+      int k = ArraySize(g_openTimes);
+      ArrayResize(g_openTimes, k + 1, 64);
+      g_openTimes[k] = TimeCurrent();
       Msg(StringFormat("%s %s %s lots @ %s", tag, (dir > 0 ? "BUY" : "SELL"),
                        DoubleToString(lots, 2), DoubleToString(g_trade.ResultPrice(), digits)), CLR_GREEN);
       return true;
@@ -909,7 +1127,11 @@ void UpdatePanel()
    if(g_state == BOT_RUNNING)
      {
       string why = BlockReason();
-      cond = (why == "") ? "Scanning for signals..." : "Waiting: " + why;
+      if(why == "" || why == "max open positions reached" || why == "cooldown after last trade")
+         cond = StringFormat("Scanning: %ss move %s%s (need %s)", DoubleToString(InpBurstWindowMs / 1000.0, 1),
+                             g_lastMove >= 0 ? "+" : "", DoubleToString(g_lastMove, 2), DoubleToString(g_lastNeed, 2));
+      else
+         cond = "Waiting: " + why;
      }
    else if(g_state == BOT_PAUSED)
       cond = "Paused after reconnect. Press START to resume.";

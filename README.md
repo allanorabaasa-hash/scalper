@@ -3,9 +3,29 @@
 XAUUSD scalping Expert Advisor for MetaTrader 5, with an on-chart control panel.
 Runs on Kali Linux through a portable Wine staging build.
 
-> **Status:** panel, risk controls and order handling are in place.
-> The entry strategy (`GetSignal()` in `src/XAUScalper.mq5`) is a placeholder that never trades yet.
-> Test on a **demo account** first.
+> **Status:** Momentum Burst strategy v1. Test in the Strategy Tester and on a **demo account** first.
+
+## Strategy: Momentum Burst
+
+No indicators, only raw ticks.
+
+1. **Burst detection**: over the last `Burst window` (3 s), price moved at least
+   `max(3 x spread, 0.50)` and at least 70% of tick changes went the same way.
+2. **Entry** in the burst direction.
+3. **Stacking**: add up to `Max stack` (3) positions in the same direction, but only while the
+   newest one is already `+0.30` in profit. Never adds to a loser.
+4. **Reverse**: an opposite burst closes everything and opens the other way.
+5. **Fast exits**: hard SL (1.50) and TP (1.50) on every order, breakeven at +0.30,
+   trailing stop from +0.50 (0.30 behind price), and every trade is closed after 20 s.
+6. **Brakes**: spread filter, cooldown (2 s), max 20 trades/minute, daily loss limit.
+
+The panel footer shows the live burst meter: the current move vs. what is needed to trigger.
+All numbers are inputs, so tune them in the Strategy Tester.
+
+### Strategy Tester
+
+The EA starts automatically in the tester. Use *Every tick based on real ticks*, set a
+*Delay* similar to your real ping (e.g. 200 ms), and test several weeks of XAUUSD.
 
 ## The panel
 
