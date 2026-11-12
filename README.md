@@ -170,7 +170,7 @@ The EA protects small accounts by:
 | Stop loss distance | 2.00 | Price distance (2.00 = $2 move in gold) |
 | Take profit distance | 2.00 | 0 = none |
 | Max spread | 0.35 | In price; skips trades when wider |
-| Max daily loss % | 3.0 | 0 = off |
+| Max daily loss % | 0 (off) | Testing phase: turn on (e.g. 5) before trading real money |
 | Use session | false | true = only trade between the session hours (PC local time) |
 | Magic number | 20261112 | Use a different one per EA/chart if running more than one |
 

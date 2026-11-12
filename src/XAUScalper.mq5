@@ -76,7 +76,7 @@ input int           InpMaxPositions      = 3;             // Max open positions 
 input int           InpCooldownSec       = 2;             // Seconds between new trades
 input int           InpMaxTradesPerMin   = 20;            // Max new trades per minute (0 = off)
 input int           InpSlippagePoints    = 30;            // Max slippage (points)
-input double        InpMaxDailyLossPct   = 5.0;           // Daily loss limit % (0 = off)
+input double        InpMaxDailyLossPct   = 0.0;           // Daily loss limit % (0 = off, testing phase)
 input double        InpDailyTargetPct    = 0.0;           // Daily profit target % (0 = off)
 
 enum ENUM_PROFILE
