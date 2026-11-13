@@ -56,10 +56,20 @@ a maximum x ATR are skipped, never widened to fit.
 | 4 | Liquidity sweep + structure shift | M5, levels | wick 0.15-2 ATR below a significant low with a close back above (a wick alone is not a sweep); sweep low holds; first close above the last swing high before the sweep | sweep low - 0.2 ATR (max 3 ATR) | 2.5R | trailing from 2R |
 | 5 | Momentum scalping | M5 (input) | EMA9 crossed above EMA21 within 3 bars; RSI7 > 55; ADX14 > 20 and rising; broker tick volume > 20-bar average; close above 5-bar high; candle <= 2 ATR and <= 1.5 ATR from EMA9 | 3-bar low - 0.2 ATR (0.8-2 ATR) | 1.8R | EMA9 back through EMA21 |
 
+**Added in v5.40 (user request):**
+
+| # | Strategy | Timeframes | Entry (buy; sell mirrored) | Stop | Target |
+|---|---|---|---|---|---|
+| 6 | Fair value gap retracement | M5, M15 trend | M15 close > EMA200 and EMA50 > EMA200; bullish FVG (C low > A high) of >= 0.3 ATR with a displacement candle body >= 1 ATR, formed within 20 bars; first retest: last bar dips into the gap, closes bullish above its middle; no close below the gap since | gap bottom / bar low - 0.3 ATR (0.6-2.5 ATR) | 2R |
+| 7 | Support/resistance bounce | M5, levels | 3 bars closed above the level, last bar touched it (0.15 ATR above to 0.3 ATR below) and closed back above with a rejection wick >= 50% or a bullish engulfing; no buys when M15 ADX > 30 with EMA50 < EMA200 | level / bar low - 0.2 ATR (0.5-2 ATR) | 2R |
+
+In Auto mode the regime map is unchanged (6 and 7 are not mapped to a regime yet); they run in
+All mode and in their own single-strategy modes.
+
 Key levels: previous day high/low, Asian session high/low (after it closes), previous completed
 session high/low, latest M15 swing high/low (strength 3). Session hours are inputs (server time).
 
-**Tests:** `StrategyTests.mq5`, 29 checks (swings, crosses, strong candle, sweep depth rules,
+**Tests:** `StrategyTests.mq5`, 34 checks (29 + FVG and rejection-wick checks in v5.40) (swings, crosses, strong candle, sweep depth rules,
 highest/lowest/average/percentile, session range). Expected values were cross-checked with an
 independent Python implementation. Not yet run in MT5.
 

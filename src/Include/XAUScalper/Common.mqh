@@ -18,13 +18,15 @@ enum ENUM_REGIME
    REGIME_DANGER   = 6
   };
 
-#define STRAT_COUNT    5
+#define STRAT_COUNT    7
 #define STRAT_NONE     -1
 #define STRAT_PULLBACK 0
 #define STRAT_BREAKOUT 1
 #define STRAT_MEANREV  2
 #define STRAT_SWEEP    3
 #define STRAT_MOMENTUM 4
+#define STRAT_FVG      5
+#define STRAT_SRBOUNCE 6
 #define STRAT_ALL      100   // pseudo-id: every enabled strategy
 
 enum ENUM_STRATEGY_MODE
@@ -35,7 +37,9 @@ enum ENUM_STRATEGY_MODE
    MODE_MEANREV  = 3,   // Only Strategy 3: RSI + Bollinger mean reversion
    MODE_SWEEP    = 4,   // Only Strategy 4: liquidity sweep + structure shift
    MODE_MOMENTUM = 5,   // Only Strategy 5: momentum scalping
-   MODE_ALL      = 6    // All strategies scan, first valid signal trades (testing)
+   MODE_ALL      = 6,   // All strategies scan, first valid signal trades (testing)
+   MODE_FVG      = 7,   // Only Strategy 6: fair value gap retracement
+   MODE_SRBOUNCE = 8    // Only Strategy 7: support/resistance bounce
   };
 
 // A trade proposal from a strategy. Numbers only, so it can be copied safely.
@@ -63,6 +67,8 @@ string StrategyCode(const int id)
       case STRAT_MEANREV:  return "MEANREV";
       case STRAT_SWEEP:    return "SWEEP";
       case STRAT_MOMENTUM: return "MOMENTUM";
+      case STRAT_FVG:      return "FVG";
+      case STRAT_SRBOUNCE: return "SRBOUNCE";
      }
    return "NONE";
   }
@@ -87,6 +93,22 @@ string RegimeName(const ENUM_REGIME r)
       case REGIME_DANGER:   return "DANGEROUS";
      }
    return "UNCLEAR";
+  }
+
+// Strategy of a single-strategy mode (STRAT_NONE for Auto / All).
+int StrategyForMode(const ENUM_STRATEGY_MODE m)
+  {
+   switch(m)
+     {
+      case MODE_PULLBACK: return STRAT_PULLBACK;
+      case MODE_BREAKOUT: return STRAT_BREAKOUT;
+      case MODE_MEANREV:  return STRAT_MEANREV;
+      case MODE_SWEEP:    return STRAT_SWEEP;
+      case MODE_MOMENTUM: return STRAT_MOMENTUM;
+      case MODE_FVG:      return STRAT_FVG;
+      case MODE_SRBOUNCE: return STRAT_SRBOUNCE;
+     }
+   return STRAT_NONE;
   }
 
 // Strategy chosen for each regime (spec section 4)

@@ -69,6 +69,13 @@ void OnStart()
    Check("average of tick volume = 20", Near(SM_AverageLong(v, 0, 3), 20));
    Check("percent rank of 5 in a[0..4] = 0.6", Near(SM_PercentRank(a, 0, 5, 5), 0.6));
 
+   //--- fair value gaps and rejection wicks
+   Check("bullish FVG: high A 100, low C 101 -> gap 1", Near(SM_BullFVG(100.0, 101.0), 1.0));
+   Check("no bullish FVG when C's low is below A's high", SM_BullFVG(101.0, 100.0) == 0.0);
+   Check("bearish FVG: low A 101, high C 100 -> gap 1", Near(SM_BearFVG(101.0, 100.0), 1.0));
+   Check("long lower wick (80%) is a bullish rejection", SM_RejectionWick(100.8, 101.0, 100.0, 100.9, 1, 0.5));
+   Check("same candle is not a bearish rejection (10% upper wick)", !SM_RejectionWick(100.8, 101.0, 100.0, 100.9, -1, 0.5));
+
    //--- session range
    MqlRates r[3];
    r[0].time = D'2026.11.13 08:00';  r[0].high = 3880;  r[0].low = 3870;

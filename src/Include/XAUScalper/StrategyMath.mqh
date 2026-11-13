@@ -156,6 +156,31 @@ double SM_PercentRank(const double &a[], const int from, const int count, const 
    return (used > 0) ? (double)below / used : 0.0;
   }
 
+// Fair value gap between candle A (older) and candle C (two bars newer).
+// Bullish: C's low is above A's high; the gap is [highA, lowC]. Returns gap size (0 = none).
+double SM_BullFVG(const double highA, const double lowC)
+  {
+   return (lowC > highA) ? lowC - highA : 0.0;
+  }
+
+// Bearish: C's high is below A's low; the gap is [highC, lowA]. Returns gap size (0 = none).
+double SM_BearFVG(const double lowA, const double highC)
+  {
+   return (highC < lowA) ? lowA - highC : 0.0;
+  }
+
+// Rejection candle: the wick on the side of the rejected move is at least
+// minWickRatio of the range (dir +1: long lower wick, dir -1: long upper wick).
+bool SM_RejectionWick(const double o, const double h, const double l, const double c, const int dir,
+                      const double minWickRatio)
+  {
+   double range = h - l;
+   if(range <= 0)
+      return false;
+   double wick = (dir > 0) ? MathMin(o, c) - l : h - MathMax(o, c);
+   return wick / range >= minWickRatio;
+  }
+
 // High and low of the bars whose open time is in [from, to). False if no bar.
 bool SM_RangeInWindow(const MqlRates &r[], const datetime from, const datetime to, double &hi, double &lo)
   {

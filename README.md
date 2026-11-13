@@ -79,7 +79,7 @@ chmod +x scripts/*.sh
 
 In MetaEditor (F4 in MT5) compile with F7: `Experts/XAUScalper.mq5`,
 `Scripts/XAUScalper/RiskTests.mq5`, `Scripts/XAUScalper/StrategyTests.mq5`.
-Run both test scripts on any chart: they must report 0 failed.
+Run both test scripts on any chart: they must report 0 failed (RiskTests 30, StrategyTests 34).
 
 Attach **XAUScalper** to the gold chart (Common tab: *Allow Algo Trading*), turn on the
 **Algo Trading** toolbar button, press **START**.

@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "5.30"
+#property version   "5.40"
 #property description "Five strategies selected by a market regime detector."
 #property description "Every entry is approved and sized by an independent risk manager."
 
@@ -17,6 +17,8 @@
 #include <XAUScalper\StratMeanReversion.mqh>
 #include <XAUScalper\StratSweep.mqh>
 #include <XAUScalper\StratMomentum.mqh>
+#include <XAUScalper\StratFVG.mqh>
+#include <XAUScalper\StratSRBounce.mqh>
 #include <XAUScalper\Regime.mqh>
 #include <XAUScalper\Filters.mqh>
 #include <XAUScalper\Execution.mqh>
@@ -41,6 +43,8 @@ input bool          InpEnableBreakout       = false;         // Enable Strategy 
 input bool          InpEnableMeanRev        = true;          // Enable Strategy 3: mean reversion
 input bool          InpEnableSweep          = false;         // Enable Strategy 4: liquidity sweep (off: PF 0.95 in test 1)
 input bool          InpEnableMomentum       = true;          // Enable Strategy 5: momentum scalping
+input bool          InpEnableFVG            = true;          // Enable Strategy 6: fair value gap retracement
+input bool          InpEnableSRBounce       = true;          // Enable Strategy 7: support/resistance bounce
 
 input group "Market regime detector (M15)"
 input double        InpRegMinScore          = 0.75;          // Rule-agreement score needed (0-1; not a probability)
@@ -128,6 +132,25 @@ input double        InpS5_MinADX            = 20;            // ADX above
 input double        InpS5_BE_R              = 1.0;           // Breakeven at (x risk, 0 = off)
 input double        InpS5_TrailStartR       = 1.0;           // Trailing starts at (x risk, 0 = off)
 input int           InpS5_MaxHoldMin        = 60;            // Max holding time (minutes)
+
+input group "Strategy 6: fair value gap retracement (M5, with M15 trend)"
+input int           InpS6_MaxAge            = 20;            // Max bars since the gap formed
+input double        InpS6_MinGapATR         = 0.30;          // Min gap size (x ATR)
+input double        InpS6_DisplacementATR   = 1.00;          // Min body of the middle candle (x ATR)
+input double        InpS6_RewardR           = 2.0;           // Take profit (x risk)
+input double        InpS6_MaxSLATR          = 2.5;           // Max stop (x ATR), wider = skip
+input double        InpS6_BE_R              = 1.0;           // Breakeven at (x risk, 0 = off)
+input int           InpS6_MaxHoldMin        = 180;           // Max holding time (minutes)
+
+input group "Strategy 7: support/resistance bounce (M5)"
+input double        InpS7_TolATR            = 0.15;          // Touch tolerance above support / below resistance (x ATR)
+input double        InpS7_MaxPierceATR      = 0.30;          // Max pierce through the level (x ATR)
+input double        InpS7_WickRatio         = 0.50;          // Rejection wick at least this share of the candle
+input double        InpS7_MaxADX            = 30;            // No bounce trades against an M15 trend with ADX above
+input double        InpS7_RewardR           = 2.0;           // Take profit (x risk)
+input double        InpS7_MaxSLATR          = 2.0;           // Max stop (x ATR), wider = skip
+input double        InpS7_BE_R              = 1.0;           // Breakeven at (x risk, 0 = off)
+input int           InpS7_MaxHoldMin        = 180;           // Max holding time (minutes)
 
 input group "Connection safety"
 input bool          InpPauseOnReconnect     = true;          // Pause bot after a connection drop
@@ -316,13 +339,32 @@ bool InitStrategies(const SessionHours &sh)
    bool ok5 = s5.Init(_Symbol, InpS5_TF, p5);
    g_s[STRAT_MOMENTUM] = s5;
 
+   FVGParams p6;
+   p6.maxAge = InpS6_MaxAge;  p6.minGapATR = InpS6_MinGapATR;  p6.displacementATR = InpS6_DisplacementATR;
+   p6.slBufferATR = 0.30;  p6.minSLATR = 0.60;  p6.maxSLATR = InpS6_MaxSLATR;  p6.rewardR = InpS6_RewardR;
+   MakePlan(p6.plan, InpS6_BE_R, 0.0, 0.0, InpS6_MaxHoldMin, 60, 0.3);
+   CStratFVG *s6 = new CStratFVG();
+   bool ok6 = s6.Init(_Symbol, p6);
+   g_s[STRAT_FVG] = s6;
+
+   SRBounceParams p7;
+   p7.tolATR = InpS7_TolATR;  p7.maxPierceATR = InpS7_MaxPierceATR;  p7.wickRatio = InpS7_WickRatio;
+   p7.maxADX = InpS7_MaxADX;  p7.slBufferATR = 0.20;  p7.minSLATR = 0.50;  p7.maxSLATR = InpS7_MaxSLATR;
+   p7.rewardR = InpS7_RewardR;  p7.swingBars = 60;  p7.swingStrength = 3;
+   MakePlan(p7.plan, InpS7_BE_R, 0.0, 0.0, InpS7_MaxHoldMin, 60, 0.3);
+   CStratSRBounce *s7 = new CStratSRBounce();
+   bool ok7 = s7.Init(_Symbol, p7, sh);
+   g_s[STRAT_SRBOUNCE] = s7;
+
    g_enabled[STRAT_PULLBACK] = InpEnablePullback;
    g_enabled[STRAT_BREAKOUT] = InpEnableBreakout;
    g_enabled[STRAT_MEANREV]  = InpEnableMeanRev;
    g_enabled[STRAT_SWEEP]    = InpEnableSweep;
    g_enabled[STRAT_MOMENTUM] = InpEnableMomentum;
+   g_enabled[STRAT_FVG]      = InpEnableFVG;
+   g_enabled[STRAT_SRBOUNCE] = InpEnableSRBounce;
 
-   return ok1 && ok2 && ok3 && ok4 && ok5;
+   return ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7;
   }
 
 string StateKey()
@@ -486,7 +528,7 @@ int ActiveStrategy(string &why)
       return STRAT_ALL;
      }
    if(InpMode != MODE_AUTO)
-      id = (int)InpMode - 1;
+      id = StrategyForMode(InpMode);
    else
      {
       id = StrategyForRegime(rg);
@@ -1371,7 +1413,7 @@ void UpdatePanel()
 
    // Header
    string mode = (InpMode == MODE_AUTO) ? "AUTO (regime selects)"
-                 : (InpMode == MODE_ALL) ? "ALL STRATEGIES (testing)" : "ONLY " + StrategyCode((int)InpMode - 1);
+                 : (InpMode == MODE_ALL) ? "ALL STRATEGIES (testing)" : "ONLY " + StrategyCode(StrategyForMode(InpMode));
    SetText("mode", mode, CLR_BLUE);
    string status = "STOPPED";
    color  pill   = CLR_GREY;
@@ -1415,7 +1457,7 @@ void UpdatePanel()
    string why;
    int act = ActiveStrategy(why);
    string reg = StringFormat("Regime: %s (score %.2f)  ->  %s", RegimeName(rg), g_regime.ScoreValue(),
-                             act == STRAT_NONE ? "WAIT" : (act == STRAT_ALL ? "ALL 5 SCANNING" : StrategyCode(act)));
+                             act == STRAT_NONE ? "WAIT" : (act == STRAT_ALL ? "ALL SCANNING" : StrategyCode(act)));
    SetText("regime", reg, rg == REGIME_DANGER ? CLR_RED : (act == STRAT_NONE ? CLR_AMBER : CLR_TEXT));
    long age = haveTick ? (long)(TimeTradeServer() - tick.time) : -1;
    SetText("tick", age >= 0 ? StringFormat("last tick %I64ds ago", age) : "no tick", age > 60 ? CLR_AMBER : CLR_MUTED);
@@ -1500,7 +1542,18 @@ void UpdatePanel()
         {
          int show = act;
          if(act == STRAT_ALL)
-            show = (int)((TimeLocal() / 3) % STRAT_COUNT);   // rotate through the strategies
+           {
+            // rotate through the enabled strategies, one every 3 seconds
+            int on[];
+            for(int i = 0; i < STRAT_COUNT; i++)
+               if(g_enabled[i])
+                 {
+                  int n = ArraySize(on);
+                  ArrayResize(on, n + 1);
+                  on[n] = i;
+                 }
+            show = (ArraySize(on) > 0) ? on[(int)((TimeLocal() / 3) % ArraySize(on))] : STRAT_PULLBACK;
+           }
          cond = StrategyCode(show) + ": " + g_s[show].GetStatus();
         }
      }
