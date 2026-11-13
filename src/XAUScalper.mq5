@@ -1,58 +1,44 @@
 //+------------------------------------------------------------------+
 //|                                                 XAUScalper.mq5   |
-//|   EMA 21/55 trend strategy (M5 by default) with on-chart panel    |
+//|        Controlled Directional Grid for XAUUSD, with panel         |
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "9.00"
-#property description "Basket mode (default): baskets of same-direction positions in the EMA 21/55 direction, closed together; lot grows with the balance."
-#property description "EMA trend mode: EMA 21/55 crossover with a daily trend filter, ATR stop and trailing stop, 1% risk."
-#property description "Same rules as tools/backtest_ema_trend.py."
+#property version   "10.00"
+#property description "Controlled Directional Grid: daily EMA 21/55 direction, 5 levels of 0.01 every $4.50,"
+#property description "basket TP +$20, basket stop -$30, hard stop $18 beyond the last level, 4% daily loss limit."
 
 #include <XAUScalper\RiskManager.mqh>
 #include <XAUScalper\Execution.mqh>
 #include <XAUScalper\Journal.mqh>
 
 //==================================================================
-//  INPUTS
+//  INPUTS (defaults = the strategy rules)
 //==================================================================
-enum ENUM_MODE
-  {
-   MODE_BASKET    = 0,   // Basket (compounding, closes together)
-   MODE_EMA_TREND = 1    // EMA 21/55 trend (one trade, ATR stops)
-  };
+input group "Direction filter (Daily)"
+input int             InpEmaFast            = 21;            // Daily EMA fast
+input int             InpEmaSlow            = 55;            // Daily EMA slow
+input double          InpFlatGapAtr         = 0.10;          // "Flat": EMA gap below this x ATR(D1,14) -> no new grid
 
-input group "Mode"
-input ENUM_MODE       InpMode               = MODE_BASKET;   // Strategy
+input group "Grid"
+input double          InpLot                = 0.01;          // Lot on every level (fixed, never increased)
+input double          InpSpacing            = 4.50;          // Grid spacing (price, USD)
+input int             InpMaxLevels          = 5;             // Maximum levels (positions) per grid
 
-input group "Basket mode"
-input int             InpBasketSize         = 10;            // Positions per basket (all the same direction)
-input double          InpBalancePer001      = 200;           // Lot per position: 0.01 for every this much balance (compounds)
-input double          InpMaxLotPerPos       = 5.0;           // Max lot per position
-input double          InpBasketTPPct        = 4.0;           // Close the whole basket at this profit (% of balance)
-input double          InpBasketSLPct        = 8.0;           // Close the whole basket at this loss (% of balance, 0 = off)
-input double          InpMinMarginLevel     = 300;           // Do not add positions below this margin level %
+input group "Exits"
+input double          InpBasketTP           = 20.0;          // Close all at this total floating profit (USD)
+input double          InpBasketStop         = 30.0;          // Close all at this total floating loss (USD, 0 = off)
+input double          InpHardStop           = 18.0;          // Close all when price is this far beyond the last level (USD)
 
-input group "EMA trend mode (also gives the basket direction)"
-input ENUM_TIMEFRAMES InpTF                 = PERIOD_M5;     // Trading timeframe (M5 or M1; H4 = original)
-input int             InpEmaFast            = 21;            // Fast EMA
-input int             InpEmaSlow            = 55;            // Slow EMA
-input int             InpAtrPeriod          = 14;            // ATR period
-input double          InpSlAtr              = 1.5;           // Initial stop (x ATR)
-input double          InpTrailStartAtr      = 1.0;           // Start trailing after this profit (x ATR)
-input double          InpTrailAtr           = 2.0;           // Trailing distance (x ATR)
-input bool            InpDailyFilter        = true;          // Trade only with the daily trend (D1 EMA fast vs slow)
-input double          InpMinAtrRatio        = 0.5;           // Skip if ATR < this x its 100-bar average (0 = off)
-
-input group "Risk"
-input double          InpRiskPct            = 1.0;           // Risk per trade (% of equity); skip if the min lot risks more
+input group "Risk controls"
+input double          InpDailyLossPct       = 4.0;           // No new grids for the rest of the day after this % loss
 input double          InpEmergencyMarginLevel = 100;         // Emergency: close all below this margin level % (0 = off)
 input bool            InpAllowReal          = false;         // Allow trading on a REAL account
 input bool            InpAutoStart          = true;          // Start/resume automatically whenever connected (STOP is remembered)
 
 input group "General"
-input long            InpMagic              = 20261113;      // Magic number (unique per EA)
-input string          InpTradeComment       = "XAUScalper";  // Order comment
+input long            InpMagic              = 20261114;      // Magic number (unique per EA)
+input string          InpTradeComment       = "XAUGrid";     // Order comment
 input int             InpSlippagePoints     = 30;            // Max slippage (points)
 input bool            InpJournal            = true;          // Trade journal (Common/Files/XAUScalper_trades.csv)
 input int             InpPanelX             = 10;            // Panel X offset
@@ -69,7 +55,6 @@ enum ENUM_BOT_STATE
 
 #define MAX_ROWS 6
 #define PREFIX   "XS_"
-#define ATR_AVG  100
 
 CRiskManager   g_risk;
 CExecution     g_exec;
@@ -81,26 +66,15 @@ color          g_lastMsgColor = clrSilver;
 ulong          g_rowTicket[MAX_ROWS];
 bool           g_collapsed    = false;
 
-int            g_hFast = INVALID_HANDLE, g_hSlow = INVALID_HANDLE, g_hAtr = INVALID_HANDLE;
-int            g_hDFast = INVALID_HANDLE, g_hDSlow = INVALID_HANDLE;
-datetime       g_lastBar      = 0;
-string         g_block        = "";   // why the bot cannot trade right now
-string         g_lastSignal   = "none yet";
-int            g_dir          = 0;    // basket direction from the last closed bar (+1 buy, -1 sell, 0 wait)
-double         g_basketBase   = 0;    // balance when the current basket opened
-int            g_basketDir    = 0;
-int            g_basketOpened = 0;
-int            g_baskets = 0, g_basketWins = 0;
-bool           g_newBarForBasket = false;  // a new basket may start only on a fresh bar
-
-// latest closed-bar values (panel)
-double         g_fast = 0, g_slow = 0, g_atr = 0, g_atrAvg = 0;
-int            g_dayTrend = 0;
+int            g_hDFast = INVALID_HANDLE, g_hDSlow = INVALID_HANDLE, g_hDAtr = INVALID_HANDLE;
+int            g_filter       = 0;    // +1 buy grids, -1 sell grids, 0 none
+string         g_filterText   = "-";
+string         g_block        = "";   // why no new grid / level right now
+datetime       g_lastTry      = 0;
+int            g_grids = 0, g_gridWins = 0, g_gridLosses = 0;
 
 long           g_reasonPos[];         // positions closed by the bot, and why (journal)
 string         g_reasonText[];
-long           g_riskPos[];           // risk money per position (journal R multiple)
-double         g_riskMoney[];
 
 //--- Panel colours
 const color CLR_BG      = C'22,27,34';
@@ -130,7 +104,6 @@ string StateKey()
   }
 string ManualStopKey() { return StateKey() + "_manualstop"; }
 bool   ManualStop()    { return GlobalVariableCheck(ManualStopKey()); }
-string TFName(const ENUM_TIMEFRAMES tf) { return StringSubstr(EnumToString(tf), 7); }
 
 bool IsRealAccount()
   {
@@ -143,18 +116,6 @@ bool IsOurs()
    return PositionGetString(POSITION_SYMBOL) == _Symbol && PositionGetInteger(POSITION_MAGIC) == InpMagic;
   }
 
-// Our open position on this symbol (0 = none). Selects it.
-ulong OurPosition()
-  {
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-     {
-      ulong t = PositionGetTicket(i);
-      if(t != 0 && IsOurs())
-         return t;
-     }
-   return 0;
-  }
-
 int CountOurs()
   {
    int n = 0;
@@ -162,6 +123,32 @@ int CountOurs()
       if(PositionGetTicket(i) != 0 && IsOurs())
          n++;
    return n;
+  }
+
+// The active grid, rebuilt from the open positions (survives restarts).
+struct GridInfo
+  {
+   int    levels;     // open positions
+   int    dir;        // +1 buy grid, -1 sell grid (0 = none)
+   double lastLevel;  // lowest buy / highest sell open price
+   double pl;         // floating profit + swap
+  };
+
+void ReadGrid(GridInfo &g)
+  {
+   g.levels = 0;  g.dir = 0;  g.lastLevel = 0;  g.pl = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(PositionGetTicket(i) == 0 || !IsOurs())
+         continue;
+      int    d = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 1 : -1;
+      double p = PositionGetDouble(POSITION_PRICE_OPEN);
+      g.pl += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+      if(g.levels == 0 || (d > 0 && p < g.lastLevel) || (d < 0 && p > g.lastLevel))
+         g.lastLevel = p;
+      g.dir = d;
+      g.levels++;
+     }
   }
 
 void NoteCloseReason(const ulong ticket, const string why)
@@ -192,20 +179,6 @@ string TakeCloseReason(const long position)
    return "";
   }
 
-double TakeRiskMoney(const long position)
-  {
-   for(int i = ArraySize(g_riskPos) - 1; i >= 0; i--)
-      if(g_riskPos[i] == position)
-        {
-         double r = g_riskMoney[i];
-         ArrayRemove(g_riskPos, i, 1);
-         ArrayRemove(g_riskMoney, i, 1);
-         return r;
-        }
-   return 0;
-  }
-
-// One value of an indicator buffer at a bar shift. false when not ready.
 bool Value(const int handle, const int shift, double &v)
   {
    double b[];
@@ -213,6 +186,55 @@ bool Value(const int handle, const int shift, double &v)
       return false;
    v = b[0];
    return v != EMPTY_VALUE;
+  }
+
+// Daily direction filter from the last two COMPLETED daily candles.
+void UpdateFilter()
+  {
+   g_filter = 0;
+   double f1, s1, f2, s2, atr;
+   if(iBars(_Symbol, PERIOD_D1) < InpEmaSlow + 3 || !Value(g_hDFast, 1, f1) || !Value(g_hDSlow, 1, s1)
+      || !Value(g_hDFast, 2, f2) || !Value(g_hDSlow, 2, s2) || !Value(g_hDAtr, 1, atr))
+     {
+      g_filterText = "waiting for daily data";
+      return;
+     }
+   if((f1 - s1) * (f2 - s2) <= 0)
+     {
+      g_filterText = "EMAs crossing: no new grid";
+      return;
+     }
+   if(MathAbs(f1 - s1) < InpFlatGapAtr * atr)
+     {
+      g_filterText = StringFormat("EMAs flat (gap %.2f): no new grid", MathAbs(f1 - s1));
+      return;
+     }
+   g_filter = (f1 > s1) ? 1 : -1;
+   g_filterText = g_filter > 0 ? "UP: buy grids only" : "DOWN: sell grids only";
+  }
+
+//==================================================================
+//  DAILY LOSS LIMIT (server day, closed + floating)
+//==================================================================
+string DayKey() { return StateKey() + "_day"; }
+
+double DayStartBalance()
+  {
+   datetime today = (datetime)(TimeCurrent() / 86400 * 86400);
+   if(!GlobalVariableCheck(DayKey()) || (datetime)(long)GlobalVariableGet(DayKey()) != today)
+     {
+      GlobalVariableSet(DayKey(), (double)today);
+      GlobalVariableSet(DayKey() + "_bal", AccountInfoDouble(ACCOUNT_BALANCE));
+     }
+   return GlobalVariableGet(DayKey() + "_bal");
+  }
+
+double DayPL() { return AccountInfoDouble(ACCOUNT_EQUITY) - DayStartBalance(); }
+
+bool DailyLimitHit()
+  {
+   double start = DayStartBalance();
+   return InpDailyLossPct > 0 && start > 0 && -DayPL() >= start * InpDailyLossPct / 100.0;
   }
 
 //==================================================================
@@ -224,29 +246,27 @@ int OnInit()
    ChartSetInteger(0, CHART_FOREGROUND, false);
    ChartSetInteger(0, CHART_SHOW_ONE_CLICK, false);
 
-   if(InpEmaFast < 1 || InpEmaSlow <= InpEmaFast || InpAtrPeriod < 1 || InpSlAtr <= 0 || InpRiskPct <= 0)
+   if(InpLot <= 0 || InpSpacing <= 0 || InpMaxLevels < 1 || InpBasketTP <= 0 || InpHardStop <= 0
+      || InpEmaSlow <= InpEmaFast)
      {
-      Print("XAUScalper: check the strategy inputs (EMA slow must be above EMA fast, stop and risk above 0)");
+      Print("XAUScalper: check the inputs (lot, spacing, levels, TP and hard stop above 0; slow EMA above fast)");
       return INIT_PARAMETERS_INCORRECT;
      }
-   g_hFast  = iMA(_Symbol, InpTF, InpEmaFast, 0, MODE_EMA, PRICE_CLOSE);
-   g_hSlow  = iMA(_Symbol, InpTF, InpEmaSlow, 0, MODE_EMA, PRICE_CLOSE);
-   g_hAtr   = iATR(_Symbol, InpTF, InpAtrPeriod);
    g_hDFast = iMA(_Symbol, PERIOD_D1, InpEmaFast, 0, MODE_EMA, PRICE_CLOSE);
    g_hDSlow = iMA(_Symbol, PERIOD_D1, InpEmaSlow, 0, MODE_EMA, PRICE_CLOSE);
-   if(g_hFast == INVALID_HANDLE || g_hSlow == INVALID_HANDLE || g_hAtr == INVALID_HANDLE
-      || g_hDFast == INVALID_HANDLE || g_hDSlow == INVALID_HANDLE)
+   g_hDAtr  = iATR(_Symbol, PERIOD_D1, 14);
+   if(g_hDFast == INVALID_HANDLE || g_hDSlow == INVALID_HANDLE || g_hDAtr == INVALID_HANDLE)
      {
-      Print("XAUScalper: could not create the indicators");
+      Print("XAUScalper: could not create the daily indicators");
       return INIT_FAILED;
      }
-
    g_exec.Init(_Symbol, InpMagic, InpSlippagePoints);
    JournalInit(InpJournal);
 
+   // Risk manager: day statistics and the margin-level emergency only (the grid has its own limits).
    RiskConfig cfg;
-   cfg.magic = InpMagic;  cfg.riskPct = InpRiskPct;  cfg.minLotMaxRiskPct = 0;  cfg.maxDailyLossPct = 0;
-   cfg.dailyTargetPct = 0;  cfg.maxConsecLosses = 0;  cfg.maxPositions = (InpMode == MODE_BASKET) ? MathMax(1, InpBasketSize) : 1;  cfg.maxDailyTrades = 0;
+   cfg.magic = InpMagic;  cfg.riskPct = 1.0;  cfg.minLotMaxRiskPct = 0;  cfg.maxDailyLossPct = 0;
+   cfg.dailyTargetPct = 0;  cfg.maxConsecLosses = 0;  cfg.maxPositions = InpMaxLevels;  cfg.maxDailyTrades = 0;
    cfg.minSecBetweenTrades = 0;  cfg.cooldownAfterLossMin = 0;  cfg.emergencyDDPct = 0;
    cfg.emergencyMarginLevel = InpEmergencyMarginLevel;  cfg.marginBufferPct = 0;
    cfg.emergencyPolicy = EMERGENCY_CLOSE_ALL;
@@ -262,7 +282,10 @@ int OnInit()
    if(MQLInfoInteger(MQL_TESTER))
       g_state = BOT_RUNNING;
    g_wasConnected = (bool)TerminalInfoInteger(TERMINAL_CONNECTED);
+   DayStartBalance();
 
+   if(StringFind(_Symbol, "XAU") < 0 && StringFind(_Symbol, "GOLD") < 0)
+      Msg("Warning: the $ settings are made for gold (XAUUSD).", CLR_AMBER);
    if(IsRealAccount() && !InpAllowReal)
       Msg("REAL account: no new trades unless 'Allow trading on a REAL account' is on.", CLR_RED);
 
@@ -280,8 +303,7 @@ void OnDeinit(const int reason)
    if(reason == REASON_CHARTCHANGE || reason == REASON_PARAMETERS)
       GlobalVariableSet(StateKey(), (double)g_state);
    EventKillTimer();
-   IndicatorRelease(g_hFast);  IndicatorRelease(g_hSlow);  IndicatorRelease(g_hAtr);
-   IndicatorRelease(g_hDFast); IndicatorRelease(g_hDSlow);
+   IndicatorRelease(g_hDFast);  IndicatorRelease(g_hDSlow);  IndicatorRelease(g_hDAtr);
    ObjectsDeleteAll(0, PREFIX);
    ChartRedraw();
   }
@@ -298,18 +320,14 @@ void OnTick()
             ApplyEmergency();
         }
      }
-   OnNewBar();
-   if(InpMode == MODE_BASKET)
-      Basket();
+   Grid();
   }
 
 void OnTimer()
   {
    CheckConnection();
    CheckAutoStart();
-   OnNewBar();
-   if(InpMode == MODE_BASKET)
-      Basket();
+   Grid();
    if(g_risk.Update())
       ApplyEmergency();
    if(!MQLInfoInteger(MQL_TESTER))
@@ -317,287 +335,113 @@ void OnTimer()
   }
 
 //==================================================================
-//  STRATEGY
+//  GRID ENGINE
 //==================================================================
-// Runs once per new bar of InpTF, on the bar that just closed (shift 1).
-void OnNewBar()
+// Order every tick:
+//   1. exits (also when STOPPED): basket TP, basket stop, hard stop beyond the last level
+//   2. when RUNNING: add a level every InpSpacing against the grid, up to InpMaxLevels
+//   3. when RUNNING and flat: open a new grid in the daily direction (repeats after every close)
+void Grid()
   {
-   datetime bar = iTime(_Symbol, InpTF, 0);
-   if(bar == 0 || bar == g_lastBar)
+   GridInfo g;
+   ReadGrid(g);
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick))
       return;
 
-   // closed-bar values; retry on the next tick until the indicators are ready
-   double f1, f2, s1, s2, a1;
-   if(!Value(g_hFast, 1, f1) || !Value(g_hFast, 2, f2) || !Value(g_hSlow, 1, s1) || !Value(g_hSlow, 2, s2)
-      || !Value(g_hAtr, 1, a1))
-      return;
-   double atrs[];
-   if(CopyBuffer(g_hAtr, 0, 1, ATR_AVG, atrs) != ATR_AVG)
-      return;
-   double sum = 0;
-   for(int i = 0; i < ATR_AVG; i++)
-      sum += atrs[i];
-   g_lastBar = bar;
-
-   double c1 = iClose(_Symbol, InpTF, 1);
-   g_fast = f1;  g_slow = s1;  g_atr = a1;  g_atrAvg = sum / ATR_AVG;
-
-   // daily trend from the last COMPLETED daily candle
-   g_dayTrend = 0;
-   double df, ds;
-   if(iBars(_Symbol, PERIOD_D1) > InpEmaSlow + 1 && Value(g_hDFast, 1, df) && Value(g_hDSlow, 1, ds))
-      g_dayTrend = (df > ds) ? 1 : (df < ds ? -1 : 0);
-
-   // basket direction: EMA fast above slow and the close above fast = buy (mirror for sell)
-   g_dir = (f1 > s1 && c1 > f1) ? 1 : ((f1 < s1 && c1 < f1) ? -1 : 0);
-   if(InpMode == MODE_BASKET)
+   if(g.levels > 0)
      {
-      g_newBarForBasket = true;
-      return;
-     }
-
-   bool longSig  = f1 > s1 && f2 <= s2 && c1 > f1 && c1 > s1;
-   bool shortSig = f1 < s1 && f2 >= s2 && c1 < f1 && c1 < s1;
-   int  sig = longSig ? 1 : (shortSig ? -1 : 0);
-
-   // 1. trailing stop of the open position (works also when STOPPED)
-   ulong pos = OurPosition();
-   if(pos != 0)
-      Trail(pos);
-
-   // 2. opposite signal closes the open position (also when STOPPED: it is an exit rule)
-   if(sig != 0 && pos != 0 && PositionSelectByTicket(pos))
-     {
-      int dir = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 1 : -1;
-      if(dir == -sig)
+      string why = "";
+      double close = (g.dir > 0) ? tick.bid : tick.ask;          // price the grid would close at
+      double hardStop = g.lastLevel - g.dir * InpHardStop;
+      if(g.pl >= InpBasketTP)
+         why = "basket take profit";
+      else if(InpBasketStop > 0 && g.pl <= -InpBasketStop)
+         why = "basket stop";
+      else if(g.dir * (close - hardStop) <= 0)
+         why = "hard stop";
+      if(why != "")
         {
-         string err;
-         NoteCloseReason(pos, "opposite signal");
-         if(g_exec.Close(pos, err))
-           {
-            Msg("Closed on the opposite signal.", CLR_MUTED);
-            pos = 0;
-           }
+         CloseAll(why);
+         if(why == "basket take profit")
+            g_gridWins++;
          else
-            Msg(err, CLR_RED);
+            g_gridLosses++;
+         Msg(StringFormat("Grid closed (%s): %+.2f", why, g.pl), why == "basket take profit" ? CLR_GREEN : CLR_RED);
+         return;
         }
      }
 
-   if(sig == 0)
-      return;
-   string side = sig > 0 ? "BUY" : "SELL";
-   string when = TimeToString(iTime(_Symbol, InpTF, 1) + PeriodSeconds(InpTF), TIME_MINUTES);
-
-   // 3. new entry
-   string skip = "";
    if(g_state != BOT_RUNNING)
-      skip = "bot stopped";
-   else if(pos != 0)
-      skip = "position already open";
-   else if(InpDailyFilter && g_dayTrend != sig)
-      skip = g_dayTrend == 0 ? "no daily trend" : "against the daily trend";
-   else if(InpMinAtrRatio > 0 && a1 < InpMinAtrRatio * g_atrAvg)
-      skip = StringFormat("ATR extremely low (%.2f < %.2f)", a1, InpMinAtrRatio * g_atrAvg);
-   else
      {
-      string block = PlatformBlockReason();
-      string risk  = g_risk.CanOpen();
-      if(block != "")
-         skip = block;
-      else if(risk != "")
-         skip = risk;
+      g_block = "";
+      return;
      }
-   if(skip != "")
+   datetime now = TimeCurrent();
+   if(now == g_lastTry)                 // at most one order attempt per second
+      return;
+   g_lastTry = now;
+
+   g_block = PlatformBlockReason();
+   if(g_block != "")
+      return;
+   if(g_risk.Locked())
      {
-      g_lastSignal = StringFormat("%s %s skipped: %s", side, when, skip);
-      Msg("Signal " + g_lastSignal, CLR_AMBER);
+      g_block = g_risk.LockText();
       return;
      }
 
-   double slDist = InpSlAtr * a1;
-   string reason;
-   double riskPct = 0;
-   double lots = g_risk.SizeTrade(sig, slDist, reason, riskPct);
-   if(lots <= 0)
+   // 2. next level
+   if(g.levels > 0)
      {
-      g_lastSignal = StringFormat("%s %s skipped: %s", side, when, reason);
-      Msg("Signal " + g_lastSignal, CLR_AMBER);
+      if(g.levels >= InpMaxLevels)
+        {
+         g_block = StringFormat("all %d levels open: waiting for TP or stop", InpMaxLevels);
+         return;
+        }
+      double price = (g.dir > 0) ? tick.ask : tick.bid;          // price the level would open at
+      if(g.dir * (g.lastLevel - price) >= InpSpacing)
+         OpenLevel(g.dir, g.levels + 1);
+      g_block = "";
       return;
      }
+
+   // 3. new grid
+   UpdateFilter();
+   if(DailyLimitHit())
+     {
+      g_block = StringFormat("daily loss limit %.1f%% reached: no new grid today", InpDailyLossPct);
+      return;
+     }
+   if(g_filter == 0)
+     {
+      g_block = g_filterText;
+      return;
+     }
+   g_grids++;
+   if(!OpenLevel(g_filter, 1))
+      g_grids--;
+   g_block = "";
+  }
+
+bool OpenLevel(const int dir, const int level)
+  {
    string err;
-   double fill = 0;
    MqlTick tk;
    SymbolInfoTick(_Symbol, tk);
-   ulong ticket = g_exec.Open(sig, lots, slDist, 0, InpTradeComment, err, fill);
-   if(ticket == 0)
+   ulong pos = g_exec.OpenNoStop(dir, InpLot, InpTradeComment + ":L" + IntegerToString(level), err);
+   if(pos == 0)
      {
-      g_lastSignal = StringFormat("%s %s failed: %s", side, when, err);
-      Msg("Signal " + g_lastSignal, CLR_RED);
-      return;
+      g_block = "order rejected: " + err;
+      Msg("Order failed: " + err, CLR_RED);
+      return false;
      }
-   double riskMoney = AccountInfoDouble(ACCOUNT_EQUITY) * riskPct / 100.0;
-   int n = ArraySize(g_riskPos);
-   ArrayResize(g_riskPos, n + 1);
-   ArrayResize(g_riskMoney, n + 1);
-   g_riskPos[n] = (long)ticket;
-   g_riskMoney[n] = riskMoney;
-   g_lastSignal = StringFormat("%s %s taken: %.2f lot, stop %.2f away", side, when, lots, slDist);
-   Msg(StringFormat("%s %.2f lot at %s, stop %.2f (%.2f%% risk)", side, lots, DoubleToString(fill, _Digits),
-                    slDist, riskPct), CLR_GREEN);
-   JournalOpen((long)ticket, sig, "EMA21_55", g_dayTrend > 0 ? "D1 up" : "D1 down", lots, fill, tk.ask - tk.bid,
-               slDist, 0, a1, riskMoney, riskPct, (tk.ask - tk.bid) * lots * SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE), "");
-  }
-
-// Once the best price since entry is 1 ATR in profit, the stop follows it at 2 ATR.
-// ATR = the ATR of the signal candle. Uses closed bars only; the stop never moves back.
-void Trail(const ulong ticket)
-  {
-   if(!PositionSelectByTicket(ticket))
-      return;
-   int      dir      = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 1 : -1;
-   double   entry    = PositionGetDouble(POSITION_PRICE_OPEN);
-   datetime opened   = (datetime)PositionGetInteger(POSITION_TIME);
-   int      shift    = iBarShift(_Symbol, InpTF, opened, false);   // entry bar
-   if(shift < 1)
-      return;                                                       // entry bar not closed yet
-   double atr;
-   if(!Value(g_hAtr, shift + 1, atr) || atr <= 0)                  // signal candle
-      return;
-   double best;
-   if(dir > 0)
-      best = iHigh(_Symbol, InpTF, iHighest(_Symbol, InpTF, MODE_HIGH, shift, 1));
-   else
-     {
-      MqlTick tk;
-      double spread = SymbolInfoTick(_Symbol, tk) ? tk.ask - tk.bid : 0.0;
-      best = iLow(_Symbol, InpTF, iLowest(_Symbol, InpTF, MODE_LOW, shift, 1)) + spread;
-     }
-   if(dir * (best - entry) < InpTrailStartAtr * atr)
-      return;
-   double newSL = best - dir * InpTrailAtr * atr;
-   string err;
-   if(g_exec.MoveStop(ticket, newSL, err))
-      Msg(StringFormat("Trailing stop moved to %s", DoubleToString(newSL, _Digits)), CLR_MUTED);
-   else if(err != "")
-      Msg(err, CLR_RED);
-  }
-
-//==================================================================
-//  BASKET MODE
-//==================================================================
-double BasketLot()
-  {
-   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double vmax = MathMin(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX), InpMaxLotPerPos);
-   double lots = 0.01 * MathFloor(AccountInfoDouble(ACCOUNT_BALANCE) / MathMax(InpBalancePer001, 1));
-   if(step > 0)
-      lots = MathFloor(lots / step + 1e-9) * step;
-   return NormalizeDouble(MathMax(vmin, MathMin(lots, vmax)), 2);
-  }
-
-// Net P/L (profit + swap) of all our open positions.
-double BasketPL(int &count)
-  {
-   double pl = 0;
-   count = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-     {
-      if(PositionGetTicket(i) == 0 || !IsOurs())
-         continue;
-      pl += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
-      count++;
-     }
-   return pl;
-  }
-
-// 1. close the whole basket at the profit target or the loss limit (also when STOPPED)
-// 2. when running, flat and on a fresh bar with a direction: open a new basket
-void Basket()
-  {
-   int n;
-   double pl = BasketPL(n);
-   if(n > 0)
-     {
-      if(g_basketBase <= 0)
-         g_basketBase = AccountInfoDouble(ACCOUNT_BALANCE);   // after a restart
-      double tp = g_basketBase * InpBasketTPPct / 100.0;
-      double sl = g_basketBase * InpBasketSLPct / 100.0;
-      if(InpBasketTPPct > 0 && pl >= tp)
-        {
-         CloseAll("basket take profit");
-         g_basketWins++;
-         Msg(StringFormat("Basket closed in profit: %+.2f", pl), CLR_GREEN);
-         g_basketBase = 0;
-         return;
-        }
-      if(InpBasketSLPct > 0 && pl <= -sl)
-        {
-         CloseAll("basket stop");
-         Msg(StringFormat("Basket closed at the loss limit: %+.2f", pl), CLR_RED);
-         g_basketBase = 0;
-         return;
-        }
-     }
-
-   // keep filling a basket that is not complete (e.g. an order was rejected)
-   bool filling = (n > 0 && g_basketOpened > 0 && g_basketOpened < InpBasketSize);
-   if(g_state != BOT_RUNNING || g_risk.Locked())
-      return;
-   if(n > 0 && !filling)
-      return;
-   if(n == 0)
-     {
-      g_basketOpened = 0;
-      if(!g_newBarForBasket || g_dir == 0)
-         return;
-     }
-   string block = PlatformBlockReason();
-   if(block != "")
-      return;
-
-   if(n == 0)
-     {
-      g_newBarForBasket = false;
-      g_basketDir  = g_dir;
-      g_basketBase = AccountInfoDouble(ACCOUNT_BALANCE);
-      g_baskets++;
-     }
-   double lots = BasketLot();
-   while(g_basketOpened < InpBasketSize)
-     {
-      if(AccountInfoDouble(ACCOUNT_MARGIN) > 0 && AccountInfoDouble(ACCOUNT_MARGIN_LEVEL) < InpMinMarginLevel)
-        {
-         g_basketOpened = InpBasketSize;    // basket stays smaller: margin guard
-         Msg(StringFormat("Margin level below %.0f%%: basket kept at %d positions", InpMinMarginLevel, CountOurs()),
-             CLR_AMBER);
-         break;
-        }
-      double margin = 0;
-      MqlTick tk;
-      SymbolInfoTick(_Symbol, tk);
-      if(OrderCalcMargin(g_basketDir > 0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, _Symbol, lots,
-                         g_basketDir > 0 ? tk.ask : tk.bid, margin)
-         && margin > AccountInfoDouble(ACCOUNT_MARGIN_FREE))
-        {
-         g_basketOpened = InpBasketSize;
-         Msg("Not enough free margin: basket kept smaller.", CLR_AMBER);
-         break;
-        }
-      string err;
-      ulong pos = g_exec.OpenNoStop(g_basketDir, lots, InpTradeComment + ":B" + IntegerToString(g_baskets), err);
-      if(pos == 0)
-        {
-         Msg("Order failed: " + err, CLR_RED);
-         return;     // retry on the next timer tick
-        }
-      JournalOpen((long)pos, g_basketDir, "BASKET", "basket " + IntegerToString(g_baskets), lots,
-                  g_basketDir > 0 ? tk.ask : tk.bid, tk.ask - tk.bid, 0, 0, g_atr, 0, 0, 0, "");
-      g_basketOpened++;
-     }
-   g_lastSignal = StringFormat("basket %d: %s %d x %.2f lot", g_baskets, g_basketDir > 0 ? "BUY" : "SELL",
-                               CountOurs(), lots);
-   Msg("Opened " + g_lastSignal, CLR_BLUE);
+   double price = dir > 0 ? tk.ask : tk.bid;
+   JournalOpen((long)pos, dir, "GRID", "level " + IntegerToString(level), InpLot, price, tk.ask - tk.bid,
+               0, 0, 0, 0, 0, 0, "");
+   Msg(StringFormat("%s level %d/%d at %s", dir > 0 ? "BUY" : "SELL", level, InpMaxLevels,
+                    DoubleToString(price, _Digits)), CLR_BLUE);
+   return true;
   }
 
 //==================================================================
@@ -636,7 +480,7 @@ void CheckConnection()
    if(!connected && g_wasConnected)
      {
       g_wasConnected = false;
-      Msg("Connection lost. Stops stay on the broker's server.", CLR_RED);
+      Msg("Connection lost: the grid exits need MT5 connected.", CLR_RED);
      }
    else if(connected && !g_wasConnected)
      {
@@ -689,7 +533,7 @@ void DoStart()
    g_state = BOT_RUNNING;
    GlobalVariableDel(ManualStopKey());
    if(TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
-      Msg("Bot STARTED: waiting for the next EMA crossover.", CLR_GREEN);
+      Msg("Bot STARTED.", CLR_GREEN);
    else
       Msg("STARTED, but Algo Trading is OFF in MT5.", CLR_AMBER);
   }
@@ -698,7 +542,7 @@ void DoStop()
   {
    g_state = BOT_STOPPED;
    GlobalVariableSet(ManualStopKey(), 1);
-   Msg("STOPPED: no new trades. The open trade keeps its stop and trailing.", CLR_AMBER);
+   Msg("STOPPED: no new grids or levels. Open grid still closes at TP / stops.", CLR_AMBER);
   }
 
 void DoCloseAll()
@@ -802,11 +646,9 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
       return;
    string why = TakeCloseReason(posId);
    if(why == "")
-      why = (reason == DEAL_REASON_SL) ? "stop loss / trailing stop" : (reason == DEAL_REASON_SO ? "stop out" : "other");
-   double risk = TakeRiskMoney(posId);
+      why = (reason == DEAL_REASON_SO) ? "stop out" : "other";
    double hold = (inMsc > 0 && outMsc >= inMsc) ? (outMsc - inMsc) / 1000.0 : 0.0;
-   JournalClose(posId, type == DEAL_TYPE_SELL ? "BUY" : "SELL", InpMode == MODE_BASKET ? "BASKET" : "EMA21_55", lots, price, profit, comm, hold,
-                risk > 0 ? profit / risk : 0, risk > 0, why);
+   JournalClose(posId, type == DEAL_TYPE_SELL ? "BUY" : "SELL", "GRID", lots, price, profit, comm, hold, 0, false, why);
   }
 
 //==================================================================
@@ -945,14 +787,13 @@ void BuildPanel()
    MkRect("bg",     0, 0, PANEL_W, PANEL_H, CLR_BG, CLR_BORDER);
    MkRect("header", 0, 0, PANEL_W, 36, CLR_HEADER, CLR_BORDER);
    MkLabel("title", 14, 9, "XAU SCALPER", CLR_TEXT, 12, "Arial Bold");
-   MkLabel("mode", 150, 12, InpMode == MODE_BASKET ? "BASKET MODE (" + TFName(InpTF) + " EMA direction)"
-           : "EMA 21/55 TREND (" + TFName(InpTF) + ")", CLR_BLUE, 8, "Arial Bold");
+   MkLabel("mode", 150, 12, "DIRECTIONAL GRID", CLR_BLUE, 8, "Arial Bold");
    MkRect("pill", PANEL_W - 118, 8, 106, 20, CLR_GREY, CLR_GREY);
    MkLabel("pill_t", PANEL_W - 65, 18, "STOPPED", clrWhite, 8, "Arial Bold", ANCHOR_CENTER);
    MkButton("b_min", PANEL_W - 146, 8, 22, 20, "-", CLR_GREY, clrWhite, 10);
    MkLabel("info", 14, 44, " ", CLR_MUTED, 8);
 
-   string titles[6] = {"BALANCE", "EQUITY", "DAY P/L (CLOSED + OPEN)", "DAILY TREND (D1 EMA)", "ATR / 100-BAR AVG", "SPREAD"};
+   string titles[6] = {"BALANCE", "EQUITY", "DAY P/L (LIMIT -4%)", "GRID FLOATING P/L", "SPREAD", "MARGIN LEVEL"};
    for(int i = 0; i < 6; i++)
      {
       int x = 14 + (i % 3) * 178;
@@ -969,8 +810,8 @@ void BuildPanel()
    MkButton("b_close", 248, 188, 120, 32, "CLOSE ALL", CLR_GREY,    clrWhite, 9);
    MkButton("b_emerg", 376, 188, 152, 32, "EMERGENCY", CLR_DARKRED, clrWhite, 9);
 
-   MkLabel("t_title", 14, 226, "OPEN POSITIONS (0)", CLR_MUTED, 7, "Arial Bold");
-   string heads[6] = {"TICKET", "TYPE", "LOTS", "OPEN", "STOP", "P/L"};
+   MkLabel("t_title", 14, 226, "GRID LEVELS (0)", CLR_MUTED, 7, "Arial Bold");
+   string heads[6] = {"TICKET", "TYPE", "LOTS", "OPEN", "LEVEL", "P/L"};
    for(int c = 0; c < 6; c++)
       MkLabel("h" + IntegerToString(c), ColX(c), ROW_Y0 + 6, heads[c], CLR_MUTED, 7, "Arial",
               c == 5 ? ANCHOR_RIGHT_UPPER : ANCHOR_LEFT_UPPER);
@@ -985,7 +826,7 @@ void BuildPanel()
       MkButton("rx" + IntegerToString(r), 500, y - 2, 26, 18, "X", CLR_RED, clrWhite, 8);
       ShowObj("rx" + IntegerToString(r), false);
      }
-   MkLabel("t_empty", PANEL_W / 2, ROW_Y0 + 60, "No open positions", CLR_MUTED, 9, "Arial", ANCHOR_UPPER);
+   MkLabel("t_empty", PANEL_W / 2, ROW_Y0 + 60, "No grid open", CLR_MUTED, 9, "Arial", ANCHOR_UPPER);
 
    MkRect("sep3", 12, PANEL_H - 52, PANEL_W - 24, 1, CLR_BORDER, CLR_BORDER);
    MkLabel("f_msg",  14, PANEL_H - 44, g_lastMsg, g_lastMsgColor, 8);
@@ -1004,6 +845,10 @@ void UpdatePanel()
    string cur = AccountInfoString(ACCOUNT_CURRENCY);
    double bal = AccountInfoDouble(ACCOUNT_BALANCE);
    double eq  = AccountInfoDouble(ACCOUNT_EQUITY);
+   GridInfo g;
+   ReadGrid(g);
+   if(g.levels == 0)
+      UpdateFilter();
 
    string status = "STOPPED";
    color  pill   = CLR_GREY;
@@ -1018,37 +863,28 @@ void UpdatePanel()
 
    MqlTick tick;
    double spread = SymbolInfoTick(_Symbol, tick) ? tick.ask - tick.bid : 0.0;
+   double ml = AccountInfoDouble(ACCOUNT_MARGIN) > 0 ? AccountInfoDouble(ACCOUNT_MARGIN_LEVEL) : 0.0;
+   double day = DayPL();
    SetText("s_v0", DoubleToString(bal, 2) + " " + cur, CLR_TEXT);
    SetText("s_v1", DoubleToString(eq, 2) + " " + cur, CLR_TEXT);
-   SetText("s_v2", Signed(g_risk.DayPL()), PLColor(g_risk.DayPL()));
-   if(!InpDailyFilter)
-      SetText("s_v3", "filter off", CLR_MUTED);
-   else
-      SetText("s_v3", g_dayTrend > 0 ? "UP (buys only)" : (g_dayTrend < 0 ? "DOWN (sells only)" : "none"),
-              g_dayTrend > 0 ? CLR_GREEN : (g_dayTrend < 0 ? CLR_RED : CLR_MUTED));
-   bool atrLow = InpMinAtrRatio > 0 && g_atr < InpMinAtrRatio * g_atrAvg;
-   SetText("s_v4", DoubleToString(g_atr, 2) + " / " + DoubleToString(g_atrAvg, 2), atrLow ? CLR_AMBER : CLR_TEXT);
-   SetText("s_v5", DoubleToString(spread, _Digits), CLR_TEXT);
+   SetText("s_v2", Signed(day) + StringFormat("  (%.1f%%)", DayStartBalance() > 0 ? day / DayStartBalance() * 100 : 0),
+           PLColor(day));
+   SetText("s_v3", Signed(g.pl), PLColor(g.pl));
+   SetText("s_v4", DoubleToString(spread, _Digits), CLR_TEXT);
+   SetText("s_v5", ml > 0 ? DoubleToString(ml, 0) + "%" : "-", CLR_TEXT);
 
-   if(InpMode == MODE_BASKET)
-      SetText("sig1", StringFormat("Direction %s   Lot %.2f x %d   EMA%d %s  EMA%d %s",
-                                   g_dir > 0 ? "BUY" : (g_dir < 0 ? "SELL" : "WAIT"), BasketLot(), InpBasketSize,
-                                   InpEmaFast, DoubleToString(g_fast, 1), InpEmaSlow, DoubleToString(g_slow, 1)),
-              g_dir > 0 ? CLR_GREEN : (g_dir < 0 ? CLR_RED : CLR_MUTED));
-   else
-   SetText("sig1", StringFormat("%s  EMA%d %s  EMA%d %s  (%s)", TFName(InpTF), InpEmaFast, DoubleToString(g_fast, _Digits),
-                                InpEmaSlow, DoubleToString(g_slow, _Digits), g_fast > g_slow ? "fast above" : "fast below"),
-           CLR_TEXT);
-   if(InpMode == MODE_BASKET)
+   SetText("sig1", "Daily trend: " + g_filterText, g_filter > 0 ? CLR_GREEN : (g_filter < 0 ? CLR_RED : CLR_AMBER));
+   if(g.levels > 0)
      {
-      int n;
-      double pl = BasketPL(n);
-      double base = g_basketBase > 0 ? g_basketBase : bal;
-      SetText("sig2", StringFormat("Basket %d (%d won): %d open, P/L %+.2f  TP +%.2f  SL -%.2f", g_baskets, g_basketWins,
-                                   n, pl, base * InpBasketTPPct / 100.0, base * InpBasketSLPct / 100.0), PLColor(pl));
+      double next = g.lastLevel - g.dir * InpSpacing;
+      double hard = g.lastLevel - g.dir * InpHardStop;
+      string nx = g.levels < InpMaxLevels ? "next level " + DoubleToString(next, 2) : "hard stop " + DoubleToString(hard, 2);
+      SetText("sig2", StringFormat("%s grid %d/%d   %s   TP +%.0f  stop -%.0f", g.dir > 0 ? "BUY" : "SELL", g.levels,
+                                   InpMaxLevels, nx, InpBasketTP, InpBasketStop), CLR_MUTED);
      }
    else
-      SetText("sig2", "Last signal: " + g_lastSignal, CLR_MUTED);
+      SetText("sig2", StringFormat("Grids %d   won %d   lost %d   spacing %.2f  lot %.2f", g_grids, g_gridWins,
+                                   g_gridLosses, InpSpacing, InpLot), CLR_MUTED);
 
    int row = 0, total = 0;
    for(int i = 0; i < PositionsTotal(); i++)
@@ -1061,12 +897,13 @@ void UpdatePanel()
          continue;
       bool   isBuy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
       double pl    = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
-      double sl    = PositionGetDouble(POSITION_SL);
+      string cmt   = PositionGetString(POSITION_COMMENT);
+      int    lp    = StringFind(cmt, ":L");
       SetText(RowCell(row, 0), IntegerToString((long)ticket), CLR_TEXT);
       SetText(RowCell(row, 1), isBuy ? "BUY" : "SELL", isBuy ? CLR_GREEN : CLR_RED);
       SetText(RowCell(row, 2), DoubleToString(PositionGetDouble(POSITION_VOLUME), 2), CLR_TEXT);
       SetText(RowCell(row, 3), DoubleToString(PositionGetDouble(POSITION_PRICE_OPEN), _Digits), CLR_TEXT);
-      SetText(RowCell(row, 4), sl > 0 ? DoubleToString(sl, _Digits) : "none", sl > 0 ? CLR_MUTED : CLR_RED);
+      SetText(RowCell(row, 4), lp >= 0 ? StringSubstr(cmt, lp + 2) : "-", CLR_MUTED);
       SetText(RowCell(row, 5), Signed(pl), PLColor(pl));
       g_rowTicket[row] = ticket;
       ShowObj("rx" + IntegerToString(row), true);
@@ -1079,31 +916,24 @@ void UpdatePanel()
       g_rowTicket[row] = 0;
       ShowObj("rx" + IntegerToString(row), false);
      }
-   SetText("t_title", "OPEN POSITIONS (" + IntegerToString(total) + ")", CLR_MUTED);
+   SetText("t_title", "GRID LEVELS (" + IntegerToString(total) + ")", CLR_MUTED);
    ShowObj("t_empty", total == 0);
 
    SetText("f_msg", g_lastMsg, g_lastMsgColor);
    string cond;
    color  cc = CLR_MUTED;
-   string block = PlatformBlockReason();
    if(g_risk.Locked())
      {
       cond = "Locked: " + g_risk.LockText();
       cc = CLR_RED;
      }
-   else if(g_state == BOT_RUNNING && block != "")
+   else if(g_state == BOT_RUNNING && g_block != "")
      {
-      cond = "Cannot trade: " + block;
+      cond = "Waiting: " + g_block;
       cc = CLR_AMBER;
      }
-   else if(InpMode == MODE_BASKET && g_state == BOT_RUNNING && total > 0)
-      cond = "Basket open: closes together at the profit target or the loss limit.";
-   else if(InpMode == MODE_BASKET && g_state == BOT_RUNNING)
-      cond = "Running: next basket on the next " + TFName(InpTF) + " bar with a direction.";
-   else if(g_state == BOT_RUNNING && total > 0)
-      cond = "In a trade: exit by stop, trailing stop or opposite signal.";
    else if(g_state == BOT_RUNNING)
-      cond = "Running: waiting for an EMA crossover on " + TFName(InpTF) + ".";
+      cond = total > 0 ? "Grid active." : "Running: opening a grid.";
    else if(InpAutoStart && ManualStop())
       cond = "Stopped by you: press START to resume.";
    else

@@ -1,9 +1,0 @@
-; XAUScalper v9.00 basket mode (defaults)
-InpMode=0
-InpBasketSize=10
-InpBalancePer001=200
-InpMaxLotPerPos=5.0
-InpBasketTPPct=4.0
-InpBasketSLPct=8.0
-InpMinMarginLevel=300
-InpTF=5

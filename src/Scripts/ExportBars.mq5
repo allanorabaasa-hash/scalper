@@ -6,7 +6,7 @@
 #property script_show_inputs
 #property version "1.00"
 
-input ENUM_TIMEFRAMES InpTF   = PERIOD_M5;   // Trading timeframe to export (D1 is always exported too)
+input ENUM_TIMEFRAMES InpTF   = PERIOD_M1;   // Trading timeframe to export (D1 is always exported too)
 input int             InpBars = 200000;      // Max bars (MT5 limit: Tools > Options > Charts > Max bars)
 
 bool Export(const ENUM_TIMEFRAMES tf, const int count)
