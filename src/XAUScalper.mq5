@@ -4,8 +4,9 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "8.00"
-#property description "EMA 21/55 crossover with a daily trend filter, 1.5 ATR stop, 2 ATR trailing stop, 1% risk."
+#property version   "9.00"
+#property description "Basket mode (default): baskets of same-direction positions in the EMA 21/55 direction, closed together; lot grows with the balance."
+#property description "EMA trend mode: EMA 21/55 crossover with a daily trend filter, ATR stop and trailing stop, 1% risk."
 #property description "Same rules as tools/backtest_ema_trend.py."
 
 #include <XAUScalper\RiskManager.mqh>
@@ -15,7 +16,24 @@
 //==================================================================
 //  INPUTS
 //==================================================================
-input group "Strategy"
+enum ENUM_MODE
+  {
+   MODE_BASKET    = 0,   // Basket (compounding, closes together)
+   MODE_EMA_TREND = 1    // EMA 21/55 trend (one trade, ATR stops)
+  };
+
+input group "Mode"
+input ENUM_MODE       InpMode               = MODE_BASKET;   // Strategy
+
+input group "Basket mode"
+input int             InpBasketSize         = 10;            // Positions per basket (all the same direction)
+input double          InpBalancePer001      = 200;           // Lot per position: 0.01 for every this much balance (compounds)
+input double          InpMaxLotPerPos       = 5.0;           // Max lot per position
+input double          InpBasketTPPct        = 4.0;           // Close the whole basket at this profit (% of balance)
+input double          InpBasketSLPct        = 8.0;           // Close the whole basket at this loss (% of balance, 0 = off)
+input double          InpMinMarginLevel     = 300;           // Do not add positions below this margin level %
+
+input group "EMA trend mode (also gives the basket direction)"
 input ENUM_TIMEFRAMES InpTF                 = PERIOD_M5;     // Trading timeframe (M5 or M1; H4 = original)
 input int             InpEmaFast            = 21;            // Fast EMA
 input int             InpEmaSlow            = 55;            // Slow EMA
@@ -68,6 +86,12 @@ int            g_hDFast = INVALID_HANDLE, g_hDSlow = INVALID_HANDLE;
 datetime       g_lastBar      = 0;
 string         g_block        = "";   // why the bot cannot trade right now
 string         g_lastSignal   = "none yet";
+int            g_dir          = 0;    // basket direction from the last closed bar (+1 buy, -1 sell, 0 wait)
+double         g_basketBase   = 0;    // balance when the current basket opened
+int            g_basketDir    = 0;
+int            g_basketOpened = 0;
+int            g_baskets = 0, g_basketWins = 0;
+bool           g_newBarForBasket = false;  // a new basket may start only on a fresh bar
 
 // latest closed-bar values (panel)
 double         g_fast = 0, g_slow = 0, g_atr = 0, g_atrAvg = 0;
@@ -222,7 +246,7 @@ int OnInit()
 
    RiskConfig cfg;
    cfg.magic = InpMagic;  cfg.riskPct = InpRiskPct;  cfg.minLotMaxRiskPct = 0;  cfg.maxDailyLossPct = 0;
-   cfg.dailyTargetPct = 0;  cfg.maxConsecLosses = 0;  cfg.maxPositions = 1;  cfg.maxDailyTrades = 0;
+   cfg.dailyTargetPct = 0;  cfg.maxConsecLosses = 0;  cfg.maxPositions = (InpMode == MODE_BASKET) ? MathMax(1, InpBasketSize) : 1;  cfg.maxDailyTrades = 0;
    cfg.minSecBetweenTrades = 0;  cfg.cooldownAfterLossMin = 0;  cfg.emergencyDDPct = 0;
    cfg.emergencyMarginLevel = InpEmergencyMarginLevel;  cfg.marginBufferPct = 0;
    cfg.emergencyPolicy = EMERGENCY_CLOSE_ALL;
@@ -275,6 +299,8 @@ void OnTick()
         }
      }
    OnNewBar();
+   if(InpMode == MODE_BASKET)
+      Basket();
   }
 
 void OnTimer()
@@ -282,6 +308,8 @@ void OnTimer()
    CheckConnection();
    CheckAutoStart();
    OnNewBar();
+   if(InpMode == MODE_BASKET)
+      Basket();
    if(g_risk.Update())
       ApplyEmergency();
    if(!MQLInfoInteger(MQL_TESTER))
@@ -319,6 +347,14 @@ void OnNewBar()
    double df, ds;
    if(iBars(_Symbol, PERIOD_D1) > InpEmaSlow + 1 && Value(g_hDFast, 1, df) && Value(g_hDSlow, 1, ds))
       g_dayTrend = (df > ds) ? 1 : (df < ds ? -1 : 0);
+
+   // basket direction: EMA fast above slow and the close above fast = buy (mirror for sell)
+   g_dir = (f1 > s1 && c1 > f1) ? 1 : ((f1 < s1 && c1 < f1) ? -1 : 0);
+   if(InpMode == MODE_BASKET)
+     {
+      g_newBarForBasket = true;
+      return;
+     }
 
    bool longSig  = f1 > s1 && f2 <= s2 && c1 > f1 && c1 > s1;
    bool shortSig = f1 < s1 && f2 >= s2 && c1 < f1 && c1 < s1;
@@ -444,6 +480,124 @@ void Trail(const ulong ticket)
       Msg(StringFormat("Trailing stop moved to %s", DoubleToString(newSL, _Digits)), CLR_MUTED);
    else if(err != "")
       Msg(err, CLR_RED);
+  }
+
+//==================================================================
+//  BASKET MODE
+//==================================================================
+double BasketLot()
+  {
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double vmax = MathMin(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX), InpMaxLotPerPos);
+   double lots = 0.01 * MathFloor(AccountInfoDouble(ACCOUNT_BALANCE) / MathMax(InpBalancePer001, 1));
+   if(step > 0)
+      lots = MathFloor(lots / step + 1e-9) * step;
+   return NormalizeDouble(MathMax(vmin, MathMin(lots, vmax)), 2);
+  }
+
+// Net P/L (profit + swap) of all our open positions.
+double BasketPL(int &count)
+  {
+   double pl = 0;
+   count = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(PositionGetTicket(i) == 0 || !IsOurs())
+         continue;
+      pl += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+      count++;
+     }
+   return pl;
+  }
+
+// 1. close the whole basket at the profit target or the loss limit (also when STOPPED)
+// 2. when running, flat and on a fresh bar with a direction: open a new basket
+void Basket()
+  {
+   int n;
+   double pl = BasketPL(n);
+   if(n > 0)
+     {
+      if(g_basketBase <= 0)
+         g_basketBase = AccountInfoDouble(ACCOUNT_BALANCE);   // after a restart
+      double tp = g_basketBase * InpBasketTPPct / 100.0;
+      double sl = g_basketBase * InpBasketSLPct / 100.0;
+      if(InpBasketTPPct > 0 && pl >= tp)
+        {
+         CloseAll("basket take profit");
+         g_basketWins++;
+         Msg(StringFormat("Basket closed in profit: %+.2f", pl), CLR_GREEN);
+         g_basketBase = 0;
+         return;
+        }
+      if(InpBasketSLPct > 0 && pl <= -sl)
+        {
+         CloseAll("basket stop");
+         Msg(StringFormat("Basket closed at the loss limit: %+.2f", pl), CLR_RED);
+         g_basketBase = 0;
+         return;
+        }
+     }
+
+   // keep filling a basket that is not complete (e.g. an order was rejected)
+   bool filling = (n > 0 && g_basketOpened > 0 && g_basketOpened < InpBasketSize);
+   if(g_state != BOT_RUNNING || g_risk.Locked())
+      return;
+   if(n > 0 && !filling)
+      return;
+   if(n == 0)
+     {
+      g_basketOpened = 0;
+      if(!g_newBarForBasket || g_dir == 0)
+         return;
+     }
+   string block = PlatformBlockReason();
+   if(block != "")
+      return;
+
+   if(n == 0)
+     {
+      g_newBarForBasket = false;
+      g_basketDir  = g_dir;
+      g_basketBase = AccountInfoDouble(ACCOUNT_BALANCE);
+      g_baskets++;
+     }
+   double lots = BasketLot();
+   while(g_basketOpened < InpBasketSize)
+     {
+      if(AccountInfoDouble(ACCOUNT_MARGIN) > 0 && AccountInfoDouble(ACCOUNT_MARGIN_LEVEL) < InpMinMarginLevel)
+        {
+         g_basketOpened = InpBasketSize;    // basket stays smaller: margin guard
+         Msg(StringFormat("Margin level below %.0f%%: basket kept at %d positions", InpMinMarginLevel, CountOurs()),
+             CLR_AMBER);
+         break;
+        }
+      double margin = 0;
+      MqlTick tk;
+      SymbolInfoTick(_Symbol, tk);
+      if(OrderCalcMargin(g_basketDir > 0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, _Symbol, lots,
+                         g_basketDir > 0 ? tk.ask : tk.bid, margin)
+         && margin > AccountInfoDouble(ACCOUNT_MARGIN_FREE))
+        {
+         g_basketOpened = InpBasketSize;
+         Msg("Not enough free margin: basket kept smaller.", CLR_AMBER);
+         break;
+        }
+      string err;
+      ulong pos = g_exec.OpenNoStop(g_basketDir, lots, InpTradeComment + ":B" + IntegerToString(g_baskets), err);
+      if(pos == 0)
+        {
+         Msg("Order failed: " + err, CLR_RED);
+         return;     // retry on the next timer tick
+        }
+      JournalOpen((long)pos, g_basketDir, "BASKET", "basket " + IntegerToString(g_baskets), lots,
+                  g_basketDir > 0 ? tk.ask : tk.bid, tk.ask - tk.bid, 0, 0, g_atr, 0, 0, 0, "");
+      g_basketOpened++;
+     }
+   g_lastSignal = StringFormat("basket %d: %s %d x %.2f lot", g_baskets, g_basketDir > 0 ? "BUY" : "SELL",
+                               CountOurs(), lots);
+   Msg("Opened " + g_lastSignal, CLR_BLUE);
   }
 
 //==================================================================
@@ -651,7 +805,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
       why = (reason == DEAL_REASON_SL) ? "stop loss / trailing stop" : (reason == DEAL_REASON_SO ? "stop out" : "other");
    double risk = TakeRiskMoney(posId);
    double hold = (inMsc > 0 && outMsc >= inMsc) ? (outMsc - inMsc) / 1000.0 : 0.0;
-   JournalClose(posId, type == DEAL_TYPE_SELL ? "BUY" : "SELL", "EMA21_55", lots, price, profit, comm, hold,
+   JournalClose(posId, type == DEAL_TYPE_SELL ? "BUY" : "SELL", InpMode == MODE_BASKET ? "BASKET" : "EMA21_55", lots, price, profit, comm, hold,
                 risk > 0 ? profit / risk : 0, risk > 0, why);
   }
 
@@ -791,7 +945,8 @@ void BuildPanel()
    MkRect("bg",     0, 0, PANEL_W, PANEL_H, CLR_BG, CLR_BORDER);
    MkRect("header", 0, 0, PANEL_W, 36, CLR_HEADER, CLR_BORDER);
    MkLabel("title", 14, 9, "XAU SCALPER", CLR_TEXT, 12, "Arial Bold");
-   MkLabel("mode", 150, 12, "EMA 21/55 TREND (" + TFName(InpTF) + ")", CLR_BLUE, 8, "Arial Bold");
+   MkLabel("mode", 150, 12, InpMode == MODE_BASKET ? "BASKET MODE (" + TFName(InpTF) + " EMA direction)"
+           : "EMA 21/55 TREND (" + TFName(InpTF) + ")", CLR_BLUE, 8, "Arial Bold");
    MkRect("pill", PANEL_W - 118, 8, 106, 20, CLR_GREY, CLR_GREY);
    MkLabel("pill_t", PANEL_W - 65, 18, "STOPPED", clrWhite, 8, "Arial Bold", ANCHOR_CENTER);
    MkButton("b_min", PANEL_W - 146, 8, 22, 20, "-", CLR_GREY, clrWhite, 10);
@@ -875,10 +1030,25 @@ void UpdatePanel()
    SetText("s_v4", DoubleToString(g_atr, 2) + " / " + DoubleToString(g_atrAvg, 2), atrLow ? CLR_AMBER : CLR_TEXT);
    SetText("s_v5", DoubleToString(spread, _Digits), CLR_TEXT);
 
+   if(InpMode == MODE_BASKET)
+      SetText("sig1", StringFormat("Direction %s   Lot %.2f x %d   EMA%d %s  EMA%d %s",
+                                   g_dir > 0 ? "BUY" : (g_dir < 0 ? "SELL" : "WAIT"), BasketLot(), InpBasketSize,
+                                   InpEmaFast, DoubleToString(g_fast, 1), InpEmaSlow, DoubleToString(g_slow, 1)),
+              g_dir > 0 ? CLR_GREEN : (g_dir < 0 ? CLR_RED : CLR_MUTED));
+   else
    SetText("sig1", StringFormat("%s  EMA%d %s  EMA%d %s  (%s)", TFName(InpTF), InpEmaFast, DoubleToString(g_fast, _Digits),
                                 InpEmaSlow, DoubleToString(g_slow, _Digits), g_fast > g_slow ? "fast above" : "fast below"),
            CLR_TEXT);
-   SetText("sig2", "Last signal: " + g_lastSignal, CLR_MUTED);
+   if(InpMode == MODE_BASKET)
+     {
+      int n;
+      double pl = BasketPL(n);
+      double base = g_basketBase > 0 ? g_basketBase : bal;
+      SetText("sig2", StringFormat("Basket %d (%d won): %d open, P/L %+.2f  TP +%.2f  SL -%.2f", g_baskets, g_basketWins,
+                                   n, pl, base * InpBasketTPPct / 100.0, base * InpBasketSLPct / 100.0), PLColor(pl));
+     }
+   else
+      SetText("sig2", "Last signal: " + g_lastSignal, CLR_MUTED);
 
    int row = 0, total = 0;
    for(int i = 0; i < PositionsTotal(); i++)
@@ -926,6 +1096,10 @@ void UpdatePanel()
       cond = "Cannot trade: " + block;
       cc = CLR_AMBER;
      }
+   else if(InpMode == MODE_BASKET && g_state == BOT_RUNNING && total > 0)
+      cond = "Basket open: closes together at the profit target or the loss limit.";
+   else if(InpMode == MODE_BASKET && g_state == BOT_RUNNING)
+      cond = "Running: next basket on the next " + TFName(InpTF) + " bar with a direction.";
    else if(g_state == BOT_RUNNING && total > 0)
       cond = "In a trade: exit by stop, trailing stop or opposite signal.";
    else if(g_state == BOT_RUNNING)

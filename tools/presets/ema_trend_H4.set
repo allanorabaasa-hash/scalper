@@ -1,4 +1,5 @@
 ; XAUScalper v8.00 EMA 21/55 trend strategy on H4
+InpMode=1
 InpTF=16388
 InpEmaFast=21
 InpEmaSlow=55

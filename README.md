@@ -4,7 +4,25 @@ MetaTrader 5 Expert Advisor for XAUUSD (works on any symbol) with an on-chart co
 plus a Python backtester with the same rules. Runs on Kali Linux through a portable Wine
 staging build.
 
-## Strategy: EMA 21/55 trend (v8.00)
+## Basket mode (default, v9.00)
+
+Modelled on the "gold trading, automated" bot from the video (its code is not public; this
+copies the behaviour visible in it). Demo only: positions have no individual stop loss.
+
+| Rule | Default |
+|---|---|
+| Direction | on each new M5 bar: EMA 21 above EMA 55 and close above EMA 21 = BUY; mirror = SELL; else wait |
+| Basket | 10 positions, all in that direction, opened together when no basket is open |
+| Lot | 0.01 per position for every $200 of balance (compounds as the balance grows), max 5 lots |
+| Exit | the whole basket closes together at **+4%** of the balance, or at **-8%** (loss limit) |
+| Guard | no more positions below 300% margin level or without free margin; emergency close-all below 100% |
+
+With $500: 0.02 lot x 10 = 0.20 lot, about $20 per $1 move in gold: the basket closes at
++$20 (about $1 in your favour) or -$40 (about $2 against). All are inputs.
+
+*Mode = EMA 21/55 trend* switches to the strategy below.
+
+## Strategy: EMA 21/55 trend
 
 | Rule | Setting |
 |---|---|
