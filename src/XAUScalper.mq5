@@ -1,126 +1,74 @@
 //+------------------------------------------------------------------+
 //|                                                 XAUScalper.mq5   |
-//|        XAUUSD scalping Expert Advisor with on-chart control panel |
+//|        XAUUSD Expert Advisor with on-chart control panel          |
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "3.00"
-#property description "XAUUSD scalper with an on-chart control panel."
-#property description "Strategies: Continuous (default), Trend Pullback and Momentum Burst."
+#property version   "4.00"
+#property description "Phase B: independent risk manager. Strategy (interim): Trend Pullback."
+#property description "Every entry is approved and sized by the risk manager."
 
 #include <Trade\Trade.mqh>
+#include <XAUScalper\RiskManager.mqh>
 
 //==================================================================
 //  INPUTS
 //==================================================================
-enum ENUM_LOT_MODE
-  {
-   LOT_FIXED        = 0,   // Fixed lot size
-   LOT_RISK_PERCENT = 1    // % of balance risked per trade
-  };
-
 input group "General"
-input long          InpMagic             = 20261112;      // Magic number (unique per EA)
-input string        InpTradeComment      = "XAUScalper";  // Order comment
+input long          InpMagic                = 20261112;      // Magic number (unique per EA)
+input string        InpTradeComment         = "XAUScalper";  // Order comment prefix
+input int           InpSlippagePoints       = 30;            // Max slippage (points)
+input bool          InpJournal              = true;          // Log trades to MQL5/Files/XAUScalper_trades.csv
 
-enum ENUM_STRATEGY
-  {
-   STRAT_PULLBACK = 0,   // Trend Pullback (recommended)
-   STRAT_BURST    = 1,   // Momentum Burst (tick scalper)
-   STRAT_CONTINUOUS = 2  // Continuous: always in the market, SL 1 / TP 2
-  };
+input group "Risk management"
+input double        InpRiskPercent          = 0.5;           // Risk per trade (% of current equity)
+input double        InpMinLotMaxRiskPct     = 10.0;          // If the minimum lot risks more than that, allow it up to this % (0 = reject)
+input double        InpMaxDailyLossPct      = 2.0;           // Daily loss limit (% of the day's starting equity, 0 = off)
+input double        InpDailyTargetPct       = 0.0;           // Daily profit target, stops new trades (%, 0 = off)
+input int           InpMaxConsecLosses      = 3;             // Max losing trades in a row per day (0 = off)
+input int           InpMaxPositions         = 1;             // Max open positions
+input int           InpMaxDailyTrades       = 10;            // Max new trades per day (0 = off)
+input int           InpMinSecBetweenTrades  = 60;            // Min seconds between new trades
+input int           InpCooldownAfterLossMin = 15;            // Pause after a losing trade (minutes, 0 = off)
+input double        InpEmergencyDDPct       = 15.0;          // Emergency: equity down this % today (0 = off)
+input double        InpEmergencyMarginLevel = 150.0;         // Emergency: margin level below this % (0 = off)
+input ENUM_EMERGENCY_POLICY InpEmergencyPolicy = EMERGENCY_CLOSE_ALL; // Emergency: what to do with open positions
+input double        InpMarginBufferPct      = 50.0;          // Keep this % of free margin unused
 
-input group "Strategy"
-input ENUM_STRATEGY InpStrategy          = STRAT_CONTINUOUS; // Strategy (can also be switched on the panel)
+input group "Market filters"
+input double        InpMaxSpread            = 0.35;          // Max spread in price (0 = off)
+input bool          InpUseSession           = false;         // Only trade between the session hours below
+input int           InpStartHour            = 10;            // Session start hour (PC local time)
+input int           InpStartMinute          = 0;             // Session start minute
+input int           InpEndHour              = 19;            // Session end hour
+input int           InpEndMinute            = 0;             // Session end minute
+input bool          InpCloseAtSessionEnd    = true;          // Close bot positions when the session ends
 
-input group "Continuous strategy"
-input double        InpCT_StopLoss       = 1.00;          // Stop loss (price distance, 1.00 = $1 move)
-input double        InpCT_TakeProfit     = 2.00;          // Take profit (price distance)
-input double        InpCT_MaxOpenPctEq   = 0.1;           // Max open trades = this % of equity (min 1)
-input int           InpCT_DirWindowMs    = 5000;          // Direction = price move over this window (ms)
-input int           InpCT_EntrySpacingSec= 1;             // Seconds between new entries
-
-input group "Trend Pullback strategy"
-input ENUM_TIMEFRAMES InpPB_EntryTF      = PERIOD_M5;     // Entry timeframe
-input ENUM_TIMEFRAMES InpPB_TrendTF      = PERIOD_M15;    // Trend timeframe
-input int           InpPB_TrendEMA       = 50;            // Trend EMA period (trend timeframe)
-input int           InpPB_TrendSlopeBars = 3;             // Trend EMA must rise/fall over N bars
-input int           InpPB_PullEMA        = 20;            // Pullback EMA period (entry timeframe)
-input int           InpPB_Lookback       = 5;             // Bars to look back for the pullback
-input int           InpPB_ATRPeriod      = 14;            // ATR period (entry timeframe)
-input double        InpPB_MinATR         = 0.80;          // Skip when ATR is below this (dead market)
-input double        InpPB_SLBufferATR    = 0.20;          // SL buffer beyond the pullback swing (x ATR)
-input double        InpPB_MinSLATR       = 0.50;          // Min SL distance (x ATR)
-input double        InpPB_MaxSLATR       = 2.00;          // Max SL distance (x ATR), wider = skip
-input double        InpPB_RewardR        = 1.50;          // Take profit (x risk)
-input double        InpPB_BreakEvenR     = 1.00;          // Move SL to breakeven at (x risk), 0 = off
-input double        InpPB_MaxSpreadPctSL = 15.0;          // Skip if spread > this % of the SL distance
-input int           InpPB_SkipFromHour   = 21;            // No new trades from server hour (rollover)...
-input int           InpPB_SkipToHour     = 23;            // ...until server hour
-
-input group "Position sizing"
-input ENUM_LOT_MODE InpLotMode           = LOT_FIXED;     // Lot mode (Fixed = set on the panel)
-input double        InpFixedLots         = 0.01;          // Starting lot size (change it on the panel)
-input double        InpRiskPercent       = 1.0;           // Risk % per trade (if Lot mode = Risk %)
-input double        InpMaxRiskAtMinLot   = 5.0;           // Small accounts: allow min lot if its risk <= this % (0 = never)
-input double        InpMarginBuffer      = 50.0;          // Keep at least this % of free margin unused
-
-input group "Momentum Burst stops (price distance: 2.00 = a $2 move in gold)"
-input double        InpStopLoss          = 1.20;          // Hard stop loss on the order (safety net)
-input double        InpTakeProfit        = 0.00;          // Take profit distance (0 = none, let winners run)
-input double        InpCutLoss           = 0.50;          // Close a loser at this loss (min 2x spread)
-
-input group "Filters and limits (Max positions / cooldown / trades per minute are used in Custom profile)"
-input double        InpMaxSpread         = 0.35;          // Max spread in price (0 = off)
-input int           InpMaxPositions      = 3;             // Max open positions at once
-input int           InpCooldownSec       = 2;             // Seconds between new trades
-input int           InpMaxTradesPerMin   = 20;            // Max new trades per minute (0 = off)
-input int           InpSlippagePoints    = 30;            // Max slippage (points)
-input double        InpMaxDailyLossPct   = 0.0;           // Daily loss limit % (0 = off, testing phase)
-input double        InpDailyTargetPct    = 0.0;           // Daily profit target % (0 = off)
-
-enum ENUM_PROFILE
-  {
-   PROFILE_SAFE       = 0,  // Safe: fewer, stronger bursts
-   PROFILE_BALANCED   = 1,  // Balanced
-   PROFILE_AGGRESSIVE = 2,  // Aggressive: more trades, faster exits
-   PROFILE_CUSTOM     = 3   // Custom: use the values below
-  };
-
-input group "Momentum burst strategy (values below are used in Custom profile)"
-input ENUM_PROFILE  InpProfile           = PROFILE_BALANCED; // Profile (can also be switched on the panel)
-input bool          InpJournal           = true;          // Write every trade to MQL5/Files/XAUScalper_journal.csv
-input int           InpBurstWindowMs     = 3000;          // Burst window (milliseconds)
-input double        InpBurstSpreadMult   = 3.0;           // Burst must move at least N x spread
-input double        InpBurstMinMove      = 0.50;          // ...and at least this price distance
-input int           InpBurstMinTicks     = 6;             // Min price changes inside the window
-input double        InpBurstDirRatio     = 0.70;          // Share of ticks in the burst direction (0.5-1)
-input int           InpMaxStack          = 3;             // Max positions stacked in one direction
-input double        InpStackStep         = 0.40;          // Add only when newest position is up this much
-input bool          InpReverseOnBurst    = true;          // Opposite burst: close all and reverse
-input double        InpBreakEvenTrigger  = 0.50;          // Move SL to breakeven at this profit (0 = off)
-input double        InpBreakEvenLock     = 0.10;          // Profit locked at breakeven
-input double        InpTrailStart        = 1.00;          // Start trailing at this profit (0 = off)
-input double        InpTrailDistance     = 0.50;          // Trailing distance behind price
-input double        InpTrailStep         = 0.05;          // Min SL move before modifying
-input int           InpMaxHoldSec        = 15;            // Close a trade not yet in profit after N seconds (0 = off)
-
-input group "Session (PC local time)"
-input bool          InpUseSession        = false;         // Limit trading to session hours (false = trade any time)
-input int           InpStartHour         = 10;            // Session start hour
-input int           InpStartMinute       = 0;             // Session start minute
-input int           InpEndHour           = 19;            // Session end hour
-input int           InpEndMinute         = 0;             // Session end minute
-input bool          InpCloseAtSessionEnd = true;          // Close all positions when session ends
+input group "Trend Pullback strategy (interim: rebuilt as Strategy 1 in Phase C)"
+input ENUM_TIMEFRAMES InpPB_EntryTF         = PERIOD_M5;     // Entry timeframe
+input ENUM_TIMEFRAMES InpPB_TrendTF         = PERIOD_M15;    // Trend timeframe
+input int           InpPB_TrendEMA          = 50;            // Trend EMA period (trend timeframe)
+input int           InpPB_TrendSlopeBars    = 3;             // Trend EMA must rise/fall over N bars
+input int           InpPB_PullEMA           = 20;            // Pullback EMA period (entry timeframe)
+input int           InpPB_Lookback          = 5;             // Bars to look back for the pullback
+input int           InpPB_ATRPeriod         = 14;            // ATR period (entry timeframe)
+input double        InpPB_MinATR            = 0.80;          // Skip when ATR is below this (dead market)
+input double        InpPB_SLBufferATR       = 0.20;          // SL buffer beyond the pullback swing (x ATR)
+input double        InpPB_MinSLATR          = 0.50;          // Min SL distance (x ATR)
+input double        InpPB_MaxSLATR          = 2.00;          // Max SL distance (x ATR), wider = skip
+input double        InpPB_RewardR           = 1.50;          // Take profit (x risk)
+input double        InpPB_BreakEvenR        = 1.00;          // Move SL to breakeven at (x risk), 0 = off
+input double        InpPB_MaxSpreadPctSL    = 15.0;          // Skip if spread > this % of the SL distance
+input int           InpPB_SkipFromHour      = 21;            // No new trades from server hour (rollover)...
+input int           InpPB_SkipToHour        = 23;            // ...until server hour
 
 input group "Connection safety"
-input bool          InpPauseOnReconnect  = true;          // Pause bot after a connection drop
-input bool          InpCloseOnReconnect  = false;         // Close all positions after a connection drop
+input bool          InpPauseOnReconnect     = true;          // Pause bot after a connection drop
+input bool          InpCloseOnReconnect     = false;         // Close all positions after a connection drop
 
 input group "Panel"
-input bool          InpShowManualButtons = true;          // Show manual BUY / SELL buttons
-input int           InpPanelX            = 10;            // Panel X offset
-input int           InpPanelY            = 30;            // Panel Y offset
+input int           InpPanelX               = 10;            // Panel X offset
+input int           InpPanelY               = 30;            // Panel Y offset
 
 //==================================================================
 //  STATE
@@ -132,64 +80,55 @@ enum ENUM_BOT_STATE
    BOT_PAUSED  = 2
   };
 
-#define MAX_ROWS 8
+#define MAX_ROWS 6
 #define PREFIX   "XS_"
+#define STRATEGY_NAME "PULLBACK"
 
 CTrade         g_trade;
+CRiskManager   g_risk;
 ENUM_BOT_STATE g_state           = BOT_STOPPED;
-bool           g_dailyLimitHit   = false;
-datetime       g_dailyLimitDay   = 0;
-datetime       g_lastTradeTime   = 0;
 bool           g_wasConnected    = true;
 bool           g_prevSessionOpen = false;
-double         g_todayClosed     = 0.0;
-double         g_floating        = 0.0;
 string         g_lastMsg         = "Ready. Press START to begin.";
 color          g_lastMsgColor    = clrSilver;
 ulong          g_rowTicket[MAX_ROWS];
 bool           g_collapsed       = false;
-datetime       g_openTimes[];                 // entry times, for the trades-per-minute limit
-double         g_lastMove        = 0.0;       // last measured burst move (for the panel)
-double         g_lastNeed        = 0.0;       // move required to trigger
-double         g_lastRatio       = 0.0;       // share of ticks in the move's direction
-int            g_lastTicks       = 0;         // price changes inside the window
-int            g_tradesToday     = 0;
-int            g_winsToday       = 0;
 
-struct StrategyParams
-  {
-   int    windowMs;
-   double spreadMult;
-   double minMove;
-   int    minTicks;
-   double dirRatio;
-   int    maxStack;
-   double stackStep;
-   int    maxPositions;
-   int    cooldownSec;
-   int    maxTradesPerMin;
-   double beTrigger;
-   double beLock;
-   double trailStart;
-   double trailDist;
-   int    maxHoldSec;
-   double hardSL;
-   double tpDist;
-   double cutLoss;
-  };
-StrategyParams g_p;
-ENUM_PROFILE   g_profile = PROFILE_BALANCED;
-ENUM_STRATEGY  g_strategy = STRAT_CONTINUOUS;
-double         g_lots      = 0.01;        // lot size set on the panel
-string         g_ctStatus  = "starting";
 int            g_hTrendEMA = INVALID_HANDLE;
 int            g_hPullEMA  = INVALID_HANDLE;
 int            g_hATR      = INVALID_HANDLE;
 datetime       g_pbLastBar = 0;
 string         g_pbStatus  = "waiting for the next bar";
-long           g_reasonPos[];             // positions closed by the bot, and why (for the journal)
+double         g_sigSL     = 0.0;      // stop distance of the last signal (journal)
+double         g_sigATR    = 0.0;      // ATR at the last signal (journal)
+datetime       g_lastModifyFail = 0;
+
+long           g_reasonPos[];          // positions closed by the bot, and why (journal)
 string         g_reasonText[];
 
+//--- Panel colours
+const color CLR_BG      = C'22,27,34';
+const color CLR_HEADER  = C'13,17,23';
+const color CLR_BORDER  = C'48,54,61';
+const color CLR_ROWALT  = C'28,33,40';
+const color CLR_TEXT    = C'230,237,243';
+const color CLR_MUTED   = C'139,148,158';
+const color CLR_GREEN   = C'46,160,67';
+const color CLR_RED     = C'218,54,51';
+const color CLR_DARKRED = C'130,25,25';
+const color CLR_AMBER   = C'210,153,34';
+const color CLR_GREY    = C'87,96,106';
+const color CLR_BLUE    = C'31,111,235';
+
+//--- Panel geometry
+#define PANEL_W  540
+#define PANEL_H  472
+#define ROW_Y0   240
+#define ROW_H    22
+
+//==================================================================
+//  CLOSE REASONS (for the journal)
+//==================================================================
 void NoteCloseReason(const ulong ticket, const string why)
   {
    int n = ArraySize(g_reasonPos);
@@ -218,284 +157,15 @@ string TakeCloseReason(const long position)
    return "";
   }
 
-string ProfileName(ENUM_PROFILE p)
-  {
-   switch(p)
-     {
-      case PROFILE_SAFE:       return "SAFE";
-      case PROFILE_BALANCED:   return "BALANCED";
-      case PROFILE_AGGRESSIVE: return "AGGRESSIVE";
-      default:                 return "CUSTOM";
-     }
-  }
-
-void SetParams(int window, double mult, double minMove, int ticks, double ratio, int stack, double step,
-               int cooldown, int perMin, double beT, double beL, double trS, double trD, int hold,
-               double hardSL, double tp, double cut)
-  {
-   g_p.hardSL = hardSL;  g_p.tpDist = tp;  g_p.cutLoss = cut;
-   g_p.windowMs = window;  g_p.spreadMult = mult;  g_p.minMove = minMove;  g_p.minTicks = ticks;
-   g_p.dirRatio = ratio;   g_p.maxStack = stack;   g_p.stackStep = step;   g_p.maxPositions = stack;
-   g_p.cooldownSec = cooldown;  g_p.maxTradesPerMin = perMin;
-   g_p.beTrigger = beT;  g_p.beLock = beL;  g_p.trailStart = trS;  g_p.trailDist = trD;  g_p.maxHoldSec = hold;
-  }
-
-void ApplyProfile()
-  {
-   switch(g_profile)
-     {
-      // Cut losers fast, let winners run: small loss cut, no take profit, wide trailing stop.
-      //                       window mult min  ticks ratio stack step cool /min BE   lock trail dist hold hardSL TP  cut
-      case PROFILE_SAFE:       SetParams(3000, 3.0, 0.50, 6, 0.70, 2, 0.50, 3, 10, 0.60, 0.10, 1.20, 0.60, 20, 1.50, 0, 0.60); break;
-      case PROFILE_BALANCED:   SetParams(2000, 2.5, 0.40, 5, 0.68, 3, 0.40, 1, 20, 0.50, 0.10, 1.00, 0.50, 15, 1.20, 0, 0.50); break;
-      case PROFILE_AGGRESSIVE: SetParams(1500, 2.0, 0.30, 4, 0.65, 5, 0.30, 0, 40, 0.40, 0.05, 0.80, 0.40, 10, 1.00, 0, 0.40); break;
-      default:
-         SetParams(InpBurstWindowMs, InpBurstSpreadMult, InpBurstMinMove, InpBurstMinTicks, InpBurstDirRatio,
-                   InpMaxStack, InpStackStep, InpCooldownSec, InpMaxTradesPerMin, InpBreakEvenTrigger,
-                   InpBreakEvenLock, InpTrailStart, InpTrailDistance, InpMaxHoldSec,
-                   InpStopLoss, InpTakeProfit, InpCutLoss);
-         g_p.maxPositions = InpMaxPositions;
-         break;
-     }
-  }
-
-//--- Panel colours
-const color CLR_BG      = C'22,27,34';
-const color CLR_HEADER  = C'13,17,23';
-const color CLR_BORDER  = C'48,54,61';
-const color CLR_ROWALT  = C'28,33,40';
-const color CLR_TEXT    = C'230,237,243';
-const color CLR_MUTED   = C'139,148,158';
-const color CLR_GREEN   = C'46,160,67';
-const color CLR_RED     = C'218,54,51';
-const color CLR_AMBER   = C'210,153,34';
-const color CLR_GREY    = C'87,96,106';
-const color CLR_BLUE    = C'31,111,235';
-
-//--- Panel geometry
-#define PANEL_W  540
-#define PANEL_H  454
-#define ROW_Y0   222
-#define ROW_H    22
-
 //==================================================================
-//  STRATEGY: MOMENTUM BURST
-//==================================================================
-// 1. Watch raw ticks. A burst = price moved at least max(N x spread, min move)
-//    within the window, with most ticks pointing the same way.
-// 2. Enter in the burst direction. Stack more positions only while the newest
-//    one is already in profit (never add to a loser).
-// 3. Opposite burst: close everything and reverse.
-// 4. Exits: hard SL on every order, breakeven, trailing stop, max hold time.
-
-ulong NowMsc()
-  {
-   MqlTick tick;
-   ulong t = 0;
-   if(SymbolInfoTick(_Symbol, tick))
-      t = (ulong)tick.time_msc;
-   ulong srv = (ulong)TimeTradeServer() * 1000;
-   return (t > srv ? t : srv);
-  }
-
-// +1 = up burst, -1 = down burst, 0 = none
-int BurstDirection()
-  {
-   MqlTick now;
-   if(!SymbolInfoTick(_Symbol, now))
-      return 0;
-
-   ulong to   = (ulong)now.time_msc;
-   ulong from = (to > (ulong)g_p.windowMs) ? to - (ulong)g_p.windowMs : 0;
-   MqlTick ticks[];
-   int n = CopyTicksRange(_Symbol, ticks, COPY_TICKS_INFO, from, to);
-   if(n < 2)
-      return 0;
-
-   int up = 0, down = 0;
-   for(int i = 1; i < n; i++)
-     {
-      double d = ticks[i].bid - ticks[i - 1].bid;
-      if(d > 0)
-         up++;
-      else if(d < 0)
-         down++;
-     }
-   int changes = up + down;
-   double spread = now.ask - now.bid;
-   g_lastMove = ticks[n - 1].bid - ticks[0].bid;
-   g_lastNeed = MathMax(g_p.minMove, g_p.spreadMult * spread);
-   g_lastTicks = changes;
-   g_lastRatio = (changes > 0) ? (double)(g_lastMove >= 0 ? up : down) / changes : 0.0;
-
-   if(changes < g_p.minTicks)
-      return 0;
-   if(g_lastMove >= g_lastNeed && (double)up / changes >= g_p.dirRatio)
-      return 1;
-   if(-g_lastMove >= g_lastNeed && (double)down / changes >= g_p.dirRatio)
-      return -1;
-   return 0;
-  }
-
-// Our positions in one direction: count, and profit (price distance) of the newest.
-void SideInfo(const int dir, int &count, double &newestProfit)
-  {
-   count = 0;
-   newestProfit = 0.0;
-   long newestTime = 0;
-   MqlTick tick;
-   if(!SymbolInfoTick(_Symbol, tick))
-      return;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-     {
-      if(PositionGetTicket(i) == 0 || !IsOurs())
-         continue;
-      bool isBuy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
-      if((dir > 0) != isBuy)
-         continue;
-      count++;
-      long t = PositionGetInteger(POSITION_TIME_MSC);
-      if(t > newestTime)
-        {
-         newestTime = t;
-         double open = PositionGetDouble(POSITION_PRICE_OPEN);
-         newestProfit = isBuy ? tick.bid - open : open - tick.ask;
-        }
-     }
-  }
-
-void CloseSide(const int dir)
-  {
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-     {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0 || !IsOurs())
-         continue;
-      bool isBuy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
-      if((dir > 0) == isBuy)
-        {
-         NoteCloseReason(ticket, "reverse");
-         g_trade.PositionClose(ticket, InpSlippagePoints);
-        }
-     }
-  }
-
-void RunBurst()
-  {
-   int dir = BurstDirection();
-   if(dir == 0)
-      return;
-
-   int oppCount, sameCount;
-   double oppProfit, sameProfit;
-   SideInfo(-dir, oppCount, oppProfit);
-   if(oppCount > 0)
-     {
-      if(!InpReverseOnBurst)
-         return;
-      CloseSide(-dir);
-      Msg(StringFormat("Reverse: closed %d %s position(s)", oppCount, dir > 0 ? "SELL" : "BUY"), CLR_AMBER);
-     }
-
-   SideInfo(dir, sameCount, sameProfit);
-   if(sameCount >= g_p.maxStack)
-      return;
-   if(sameCount > 0 && sameProfit < g_p.stackStep)
-      return;   // only add to a position that is already winning
-   if(BlockReason() != "")
-      return;
-
-   OpenTradeEx(dir, sameCount > 0 ? "STACK" : "BURST", g_p.hardSL, g_p.tpDist);
-  }
-
-// Burst: breakeven, trailing stop and max hold time for every open position of this EA.
-void ManageBurst()
-  {
-   if(!TerminalInfoInteger(TERMINAL_CONNECTED))
-      return;
-   MqlTick tick;
-   if(!SymbolInfoTick(_Symbol, tick))
-      return;
-
-   int    digits   = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   double point    = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   double stopsLvl = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
-   ulong  nowMsc   = NowMsc();
-
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-     {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0 || !IsOurs())
-         continue;
-
-      bool   isBuy  = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
-      double open   = PositionGetDouble(POSITION_PRICE_OPEN);
-      double sl     = PositionGetDouble(POSITION_SL);
-      double tp     = PositionGetDouble(POSITION_TP);
-      ulong  openMs = (ulong)PositionGetInteger(POSITION_TIME_MSC);
-      double profit = isBuy ? tick.bid - open : open - tick.ask;
-
-      // 1. Cut losers fast (never tighter than 2x spread, or noise alone would hit it)
-      double cut = MathMax(g_p.cutLoss, 2.0 * (tick.ask - tick.bid));
-      if(g_p.cutLoss > 0 && profit <= -cut)
-        {
-         NoteCloseReason(ticket, "loss cut");
-         g_trade.PositionClose(ticket, InpSlippagePoints);
-         continue;
-        }
-
-      // 2. Time stop only for trades that are not winning yet; winners are left to run
-      bool winning = (g_p.beTrigger > 0) ? profit >= g_p.beTrigger : profit > 0;
-      if(!winning && g_p.maxHoldSec > 0 && nowMsc > openMs && nowMsc - openMs >= (ulong)g_p.maxHoldSec * 1000)
-        {
-         NoteCloseReason(ticket, "time stop");
-         g_trade.PositionClose(ticket, InpSlippagePoints);
-         continue;
-        }
-
-      double newSL = sl;
-
-      // Breakeven
-      if(g_p.beTrigger > 0 && profit >= g_p.beTrigger)
-        {
-         double be = isBuy ? open + g_p.beLock : open - g_p.beLock;
-         if(isBuy && (newSL == 0 || be > newSL))
-            newSL = be;
-         if(!isBuy && (newSL == 0 || be < newSL))
-            newSL = be;
-        }
-
-      // Trailing stop
-      if(g_p.trailStart > 0 && profit >= g_p.trailStart)
-        {
-         double trail = isBuy ? tick.bid - g_p.trailDist : tick.ask + g_p.trailDist;
-         if(isBuy && (newSL == 0 || trail > newSL))
-            newSL = trail;
-         if(!isBuy && (newSL == 0 || trail < newSL))
-            newSL = trail;
-        }
-
-      newSL = NormalizeDouble(newSL, digits);
-      if(newSL == sl || MathAbs(newSL - sl) < InpTrailStep)
-         continue;
-      // respect the broker's minimum stop distance
-      if(isBuy && newSL > tick.bid - stopsLvl)
-         continue;
-      if(!isBuy && newSL < tick.ask + stopsLvl)
-         continue;
-      g_trade.PositionModify(ticket, newSL, tp);
-     }
-  }
-
-//==================================================================
-//  STRATEGY: TREND PULLBACK
+//  STRATEGY (interim): TREND PULLBACK
 //==================================================================
 // 1. Trend: trend-timeframe EMA is rising (falling) and price is above (below) it.
 // 2. Pullback: within the last few entry bars price dipped back to the entry EMA.
 // 3. Resumption: the last closed bar closes back beyond the EMA, in the trend
 //    direction, and breaks the previous bar's high (low).
 // 4. Stop beyond the pullback swing (ATR buffer), take profit at RewardR x risk,
-//    breakeven at BreakEvenR x risk. One trade at a time.
+//    breakeven at BreakEvenR x risk. Uses closed bars only.
 
 bool RolloverHours()
   {
@@ -561,7 +231,6 @@ void PullbackSignal(int &dir, double &slDist, double &tpDist)
       return;
      }
 
-   // Pullback to the EMA within the lookback, and the swing extreme of that pullback
    bool   pulled = false;
    double swing  = (trendDir > 0) ? DBL_MAX : 0.0;
    for(int i = 0; i < InpPB_Lookback; i++)
@@ -614,47 +283,50 @@ void PullbackSignal(int &dir, double &slDist, double &tpDist)
       return;
      }
 
-   tpDist = InpPB_RewardR * slDist;
-   dir    = trendDir;
-   g_pbStatus = "trend " + tName + ", signal!";
-   g_lastMove = slDist;   // journal: stop distance
-   g_lastNeed = atr;      // journal: ATR at entry
-   g_lastRatio = 0.0;
-   g_lastTicks = 0;
+   tpDist   = InpPB_RewardR * slDist;
+   dir      = trendDir;
+   g_sigSL  = slDist;
+   g_sigATR = atr;
+   g_pbStatus = "trend " + tName + ", signal";
   }
 
 void RunPullback()
   {
-   if(CountOurPositions() > 0)
+   if(g_risk.OpenPositions() >= InpMaxPositions)
      {
       g_pbStatus = "in a trade, managing it";
       return;
      }
-   int dir;
+   int    dir;
    double slDist, tpDist;
    PullbackSignal(dir, slDist, tpDist);
    if(dir == 0)
       return;
-   string why = BlockReason();
+
+   string why = EntryBlockReason();
    if(why != "")
      {
-      g_pbStatus = "signal skipped: " + why;
+      Reject(StringFormat("%s signal rejected: %s", dir > 0 ? "BUY" : "SELL", why));
       return;
      }
-   OpenTradeEx(dir, "PULLBACK", slDist, tpDist);
+   OpenTradeEx(dir, STRATEGY_NAME, slDist, tpDist);
   }
 
-// Pullback: move the stop to breakeven once price has gone BreakEvenR x risk our way.
+// Breakeven once price has gone BreakEvenR x the initial risk in our favour.
+// The stop only ever moves towards profit, never adds risk.
 void ManagePullback()
   {
    if(InpPB_BreakEvenR <= 0 || !TerminalInfoInteger(TERMINAL_CONNECTED))
       return;
+   if(g_lastModifyFail > 0 && TimeCurrent() - g_lastModifyFail < 10)
+      return;   // back off after a failed modification
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol, tick))
       return;
    int    digits   = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    double point    = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    double stopsLvl = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
+   double freeze   = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL) * point;
    double lock     = tick.ask - tick.bid;   // cover the spread
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
@@ -674,119 +346,28 @@ void ManagePullback()
       double profit = isBuy ? tick.bid - open : open - tick.ask;
       if(profit < InpPB_BreakEvenR * risk)
          continue;
+
       double newSL = NormalizeDouble(isBuy ? open + lock : open - lock, digits);
-      if(isBuy && newSL > tick.bid - stopsLvl)
+      if(isBuy && (newSL <= sl || newSL > tick.bid - stopsLvl))
          continue;
-      if(!isBuy && newSL < tick.ask + stopsLvl)
+      if(!isBuy && (newSL >= sl || newSL < tick.ask + stopsLvl))
          continue;
+      if(freeze > 0)
+        {
+         double price = isBuy ? tick.bid : tick.ask;
+         if(MathAbs(price - sl) <= freeze || (tp > 0 && MathAbs(tp - price) <= freeze))
+            continue;   // inside the broker's freeze level: modification not allowed
+        }
+
       if(g_trade.PositionModify(ticket, newSL, tp))
          Msg("Breakeven set on #" + IntegerToString((long)ticket), CLR_MUTED);
-     }
-  }
-
-//==================================================================
-//  STRATEGY: CONTINUOUS
-//==================================================================
-// Always in the market: whenever fewer than the allowed number of trades are open,
-// open a new one in the direction price has moved over the last few seconds.
-// Every trade has a fixed SL and TP (default $1 / $2) and nothing else closes it.
-
-int MaxOpenFromEquity()
-  {
-   int n = (int)MathFloor(AccountInfoDouble(ACCOUNT_EQUITY) * InpCT_MaxOpenPctEq / 100.0);
-   return (n < 1) ? 1 : n;
-  }
-
-// +1 buy / -1 sell: the way price moved over the direction window,
-// falling back to the last closed M1 candle when price has not moved.
-int MomentumDir()
-  {
-   MqlTick now;
-   if(SymbolInfoTick(_Symbol, now))
-     {
-      ulong to   = (ulong)now.time_msc;
-      ulong from = (to > (ulong)InpCT_DirWindowMs) ? to - (ulong)InpCT_DirWindowMs : 0;
-      MqlTick ticks[];
-      int n = CopyTicksRange(_Symbol, ticks, COPY_TICKS_INFO, from, to);
-      if(n >= 2)
+      else
         {
-         double move = ticks[n - 1].bid - ticks[0].bid;
-         if(move > 0)
-            return 1;
-         if(move < 0)
-            return -1;
+         g_lastModifyFail = TimeCurrent();
+         Msg(StringFormat("Breakeven on #%I64u failed (%u): %s", ticket, g_trade.ResultRetcode(),
+                          g_trade.ResultRetcodeDescription()), CLR_RED);
         }
      }
-   double o = iOpen(_Symbol, PERIOD_M1, 1);
-   double c = iClose(_Symbol, PERIOD_M1, 1);
-   return (c >= o) ? 1 : -1;
-  }
-
-void RunContinuous()
-  {
-   int maxOpen = MaxOpenFromEquity();
-   int open    = CountOurPositions();
-   if(open >= maxOpen)
-     {
-      g_ctStatus = StringFormat("%d/%d trades open, waiting for one to close", open, maxOpen);
-      return;
-     }
-   string why = BlockReasonBase();
-   if(why != "")
-     {
-      g_ctStatus = "waiting: " + why;
-      return;
-     }
-   if(TimeCurrent() - g_lastTradeTime < InpCT_EntrySpacingSec)
-      return;
-
-   int dir = MomentumDir();
-   g_ctStatus = StringFormat("%d/%d open, opening %s", open, maxOpen, dir > 0 ? "BUY" : "SELL");
-   g_lastMove = InpCT_StopLoss;
-   g_lastNeed = InpCT_TakeProfit;
-   g_lastRatio = 0.0;
-   g_lastTicks = 0;
-   OpenTradeEx(dir, "CONT", InpCT_StopLoss, InpCT_TakeProfit);
-  }
-
-void RunStrategy()
-  {
-   if(g_strategy == STRAT_CONTINUOUS)
-      RunContinuous();
-   else if(g_strategy == STRAT_BURST)
-      RunBurst();
-   else
-      RunPullback();
-  }
-
-void ManagePositions()
-  {
-   if(g_strategy == STRAT_BURST)
-      ManageBurst();
-   else if(g_strategy == STRAT_PULLBACK)
-      ManagePullback();
-   // Continuous: trades are closed only by their own SL / TP
-  }
-
-string StrategyLabel()
-  {
-   if(g_strategy == STRAT_CONTINUOUS)
-      return "STRATEGY: CONTINUOUS";
-   if(g_strategy == STRAT_PULLBACK)
-      return "STRATEGY: PULLBACK";
-   return "BURST: " + ProfileName(g_profile);
-  }
-
-int TradesLastMinute()
-  {
-   datetime cutoff = TimeCurrent() - 60;
-   int kept = 0;
-   int n = ArraySize(g_openTimes);
-   for(int i = 0; i < n; i++)
-      if(g_openTimes[i] >= cutoff)
-         g_openTimes[kept++] = g_openTimes[i];
-   ArrayResize(g_openTimes, kept);
-   return kept;
   }
 
 //==================================================================
@@ -809,29 +390,30 @@ int OnInit()
    ChartSetInteger(0, CHART_FOREGROUND, false);
    ChartSetInteger(0, CHART_SHOW_ONE_CLICK, false);   // MT5 one-click box would cover the panel
 
-   g_profile = InpProfile;
-   string pkey = StateKey() + "_p";
-   if(GlobalVariableCheck(pkey))
+   if(InpRiskPercent <= 0 || InpMaxPositions < 1)
      {
-      g_profile = (ENUM_PROFILE)(int)GlobalVariableGet(pkey);
-      GlobalVariableDel(pkey);
+      Print("XAUScalper: Risk % must be above 0 and Max positions at least 1");
+      return INIT_PARAMETERS_INCORRECT;
      }
-   ApplyProfile();
 
-   g_strategy = InpStrategy;
-   if(!MQLInfoInteger(MQL_TESTER) && GlobalVariableCheck(StateKey() + "_lots"))
-      g_lots = GlobalVariableGet(StateKey() + "_lots");
-   else
-      g_lots = InpFixedLots;
-   g_lots = NormalizeLots(g_lots);
-   string skey = StateKey() + "_s";
-   if(GlobalVariableCheck(skey))
-     {
-      g_strategy = (ENUM_STRATEGY)(int)GlobalVariableGet(skey);
-      GlobalVariableDel(skey);
-     }
+   RiskConfig cfg;
+   cfg.magic                = InpMagic;
+   cfg.riskPct              = InpRiskPercent;
+   cfg.minLotMaxRiskPct     = InpMinLotMaxRiskPct;
+   cfg.maxDailyLossPct      = InpMaxDailyLossPct;
+   cfg.dailyTargetPct       = InpDailyTargetPct;
+   cfg.maxConsecLosses      = InpMaxConsecLosses;
+   cfg.maxPositions         = InpMaxPositions;
+   cfg.maxDailyTrades       = InpMaxDailyTrades;
+   cfg.minSecBetweenTrades  = InpMinSecBetweenTrades;
+   cfg.cooldownAfterLossMin = InpCooldownAfterLossMin;
+   cfg.emergencyDDPct       = InpEmergencyDDPct;
+   cfg.emergencyMarginLevel = InpEmergencyMarginLevel;
+   cfg.marginBufferPct      = InpMarginBufferPct;
+   cfg.emergencyPolicy      = InpEmergencyPolicy;
+   g_risk.Init(_Symbol, cfg);
+
    g_pbLastBar = 0;
-
    g_hTrendEMA = iMA(_Symbol, InpPB_TrendTF, InpPB_TrendEMA, 0, MODE_EMA, PRICE_CLOSE);
    g_hPullEMA  = iMA(_Symbol, InpPB_EntryTF, InpPB_PullEMA, 0, MODE_EMA, PRICE_CLOSE);
    g_hATR      = iATR(_Symbol, InpPB_EntryTF, InpPB_ATRPeriod);
@@ -841,12 +423,8 @@ int OnInit()
       return INIT_FAILED;
      }
 
-   // MT5 keeps global variables when inputs change, so re-check the lock here
-   if(InpMaxDailyLossPct <= 0 && InpDailyTargetPct <= 0)
-      g_dailyLimitHit = false;
-
    g_state = BOT_STOPPED;
-   // Keep RUNNING state only across a timeframe switch or input change,
+   // Keep RUNNING only across a timeframe switch or input change,
    // never across a terminal restart (power cut, reboot).
    string key = StateKey();
    if(GlobalVariableCheck(key))
@@ -854,7 +432,6 @@ int OnInit()
       g_state = (ENUM_BOT_STATE)(int)GlobalVariableGet(key);
       GlobalVariableDel(key);
      }
-
    if(MQLInfoInteger(MQL_TESTER))
       g_state = BOT_RUNNING;   // no START button to press in the Strategy Tester
 
@@ -865,7 +442,6 @@ int OnInit()
       Msg("Warning: attach this EA to a gold (XAUUSD) chart.", CLR_AMBER);
 
    BuildPanel();
-   RefreshStats();
    UpdatePanel();
    EventSetMillisecondTimer(500);
    return INIT_SUCCEEDED;
@@ -874,13 +450,7 @@ int OnInit()
 void OnDeinit(const int reason)
   {
    if(reason == REASON_CHARTCHANGE || reason == REASON_PARAMETERS)
-     {
       GlobalVariableSet(StateKey(), (double)g_state);
-      if(g_profile != InpProfile)
-         GlobalVariableSet(StateKey() + "_p", (double)g_profile);
-      if(g_strategy != InpStrategy)
-         GlobalVariableSet(StateKey() + "_s", (double)g_strategy);
-     }
 
    if(g_hTrendEMA != INVALID_HANDLE) IndicatorRelease(g_hTrendEMA);
    if(g_hPullEMA != INVALID_HANDLE)  IndicatorRelease(g_hPullEMA);
@@ -893,32 +463,37 @@ void OnDeinit(const int reason)
 
 void OnTick()
   {
-   ManagePositions();          // runs even when stopped, so open trades stay managed
+   ManagePullback();            // runs even when stopped, so open trades stay managed
+   if(MQLInfoInteger(MQL_TESTER))
+     {
+      // The tester does not use the timer: update the risk state once per second.
+      static datetime lastRiskUpdate = 0;
+      if(TimeCurrent() != lastRiskUpdate)
+        {
+         lastRiskUpdate = TimeCurrent();
+         if(g_risk.Update())
+            ApplyEmergency();
+        }
+     }
    if(g_state == BOT_RUNNING)
-      RunStrategy();
+      RunPullback();
   }
 
 void OnTimer()
   {
    CheckConnection();
-   ManagePositions();
-   RefreshStats();
-   CheckDailyLimits();
+   ManagePullback();
+   if(g_risk.Update())
+      ApplyEmergency();
    CheckSessionEnd();
    UpdatePanel();
   }
 
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
   {
-   if(id == CHARTEVENT_OBJECT_ENDEDIT && sparam == P("e_lot"))
-     {
-      ChangeLots(StringToDouble(ObjectGetString(0, sparam, OBJPROP_TEXT)));
-      UpdatePanel();
-      return;
-     }
    if(id != CHARTEVENT_OBJECT_CLICK)
       return;
-   if(StringFind(sparam, PREFIX) != 0 || sparam == P("e_lot"))
+   if(StringFind(sparam, PREFIX) != 0)
       return;
 
    ObjectSetInteger(0, sparam, OBJPROP_STATE, false);
@@ -929,35 +504,8 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
       DoStop();
    else if(sparam == P("b_close"))
       DoCloseAll();
-   else if(sparam == P("b_lminus") || sparam == P("b_lplus"))
-     {
-      double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-      if(step <= 0)
-         step = 0.01;
-      ChangeLots(g_lots + (sparam == P("b_lplus") ? step : -step));
-     }
-   else if(sparam == P("b_buy"))
-      DoManual(1);
-   else if(sparam == P("b_sell"))
-      DoManual(-1);
-   else if(sparam == P("b_mode"))
-     {
-      // CONTINUOUS -> PULLBACK -> BURST SAFE -> BALANCED -> AGGRESSIVE -> CUSTOM -> CONTINUOUS
-      if(g_strategy == STRAT_CONTINUOUS)
-         g_strategy = STRAT_PULLBACK;
-      else if(g_strategy == STRAT_PULLBACK)
-        {
-         g_strategy = STRAT_BURST;
-         g_profile  = PROFILE_SAFE;
-        }
-      else if(g_profile == PROFILE_CUSTOM)
-         g_strategy = STRAT_CONTINUOUS;
-      else
-         g_profile = (ENUM_PROFILE)((int)g_profile + 1);
-      ApplyProfile();
-      g_pbLastBar = 0;
-      Msg("Now using " + StrategyLabel(), CLR_BLUE);
-     }
+   else if(sparam == P("b_emerg"))
+      DoEmergency();
    else if(sparam == P("b_min"))
      {
       g_collapsed = !g_collapsed;
@@ -967,10 +515,13 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
      {
       int idx = (int)StringToInteger(StringSubstr(sparam, StringLen(P("rx"))));
       if(idx >= 0 && idx < MAX_ROWS && g_rowTicket[idx] > 0)
+        {
+         NoteCloseReason(g_rowTicket[idx], "manual (panel)");
          ClosePosition(g_rowTicket[idx]);
+        }
      }
 
-   RefreshStats();
+   g_risk.Update();
    UpdatePanel();
   }
 
@@ -979,9 +530,9 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 //==================================================================
 void DoStart()
   {
-   if(g_dailyLimitHit)
+   if(g_risk.Locked())
      {
-      Msg("Daily limit reached. Trading is locked until tomorrow.", CLR_RED);
+      Msg("Cannot start: " + g_risk.LockText(), CLR_RED);
       return;
      }
    g_state = BOT_RUNNING;
@@ -995,7 +546,7 @@ void DoStop()
   {
    g_state = BOT_STOPPED;
    if(CountOurPositions() > 0)
-      Msg("Bot STOPPED. Open positions stay protected by their SL/TP.", CLR_AMBER);
+      Msg("STOPPED. Open positions stay on their SL/TP and are still managed.", CLR_AMBER);
    else
       Msg("Bot STOPPED.", CLR_MUTED);
   }
@@ -1014,21 +565,30 @@ void DoCloseAll()
       CloseAll("manual close all");
   }
 
-void DoManual(const int dir)
+void DoEmergency()
   {
-   if(!TerminalInfoInteger(TERMINAL_CONNECTED))
-     {
-      Msg("No connection to the broker.", CLR_RED);
+   string policy = (InpEmergencyPolicy == EMERGENCY_CLOSE_ALL)
+                   ? "Open bot positions will be CLOSED."
+                   : "Open bot positions will be kept on their SL/TP.";
+   int answer = MessageBox("Emergency shutdown: stop the bot and block new trades until the next trading day.\n"
+                           + policy + "\n\nContinue?", "XAUScalper", MB_YESNO | MB_ICONWARNING);
+   if(answer != IDYES)
       return;
-     }
-   if(g_strategy == STRAT_CONTINUOUS)
-      OpenTradeEx(dir, "MANUAL", InpCT_StopLoss, InpCT_TakeProfit);
-   else
-      OpenTrade(dir, "MANUAL");
+   g_risk.TriggerEmergency("manual");
+   ApplyEmergency();
+  }
+
+// Applies the emergency policy after the risk manager locked trading.
+void ApplyEmergency()
+  {
+   g_state = BOT_STOPPED;
+   if(InpEmergencyPolicy == EMERGENCY_CLOSE_ALL && CountOurPositions() > 0)
+      CloseAll("emergency");
+   Msg("EMERGENCY: " + g_risk.LockText(), CLR_RED);
   }
 
 //==================================================================
-//  SAFETY CHECKS
+//  MARKET AND ENTRY CHECKS
 //==================================================================
 bool SessionOpen()
   {
@@ -1054,9 +614,8 @@ double CurrentSpread()
    return tick.ask - tick.bid;
   }
 
-// Empty string = allowed to open a new trade, otherwise the reason it is blocked.
-// Checks that apply to every strategy (connection, permissions, market, limits, spread).
-string BlockReasonBase()
+// Market and permission checks. "" = OK.
+string MarketBlockReason()
   {
    if(!TerminalInfoInteger(TERMINAL_CONNECTED))
       return "no connection to broker";
@@ -1068,28 +627,27 @@ string BlockReasonBase()
       return "this account does not allow EA trading";
    if(SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE) != SYMBOL_TRADE_MODE_FULL)
       return "market closed for " + _Symbol;
-   if(g_dailyLimitHit)
-      return "daily limit reached";
    if(!SessionOpen())
       return "outside session hours";
    double spread = CurrentSpread();
    if(InpMaxSpread > 0 && spread > InpMaxSpread)
-      return StringFormat("spread %s > max %s", DoubleToString(spread, _Digits), DoubleToString(InpMaxSpread, _Digits));
+      return StringFormat("spread too high (%s > %s)", DoubleToString(spread, _Digits), DoubleToString(InpMaxSpread, _Digits));
    return "";
   }
 
-string BlockReason()
+// Everything that must pass before a new entry: market, then risk manager.
+string EntryBlockReason()
   {
-   string base = BlockReasonBase();
-   if(base != "")
-      return base;
-   if(CountOurPositions() >= g_p.maxPositions)
-      return "max open positions reached";
-   if(TimeCurrent() - g_lastTradeTime < g_p.cooldownSec)
-      return "cooldown after last trade";
-   if(g_p.maxTradesPerMin > 0 && TradesLastMinute() >= g_p.maxTradesPerMin)
-      return "max trades per minute reached";
-   return "";
+   string why = MarketBlockReason();
+   if(why != "")
+      return why;
+   return g_risk.CanOpen();
+  }
+
+void Reject(const string why)
+  {
+   g_pbStatus = why;
+   Msg(why, CLR_AMBER);
   }
 
 void CheckConnection()
@@ -1117,48 +675,6 @@ void CheckConnection()
      }
   }
 
-void CheckDailyLimits()
-  {
-   // Both limits switched off: never lock, and clear a lock left from earlier.
-   if(InpMaxDailyLossPct <= 0 && InpDailyTargetPct <= 0)
-     {
-      if(g_dailyLimitHit)
-        {
-         g_dailyLimitHit = false;
-         Msg("Daily limits are off. Lock cleared.", CLR_MUTED);
-        }
-      return;
-     }
-   datetime today = iTime(_Symbol, PERIOD_D1, 0);
-   if(g_dailyLimitHit && today != 0 && today != g_dailyLimitDay)
-     {
-      g_dailyLimitHit = false;
-      Msg("New trading day. Daily limit reset.", CLR_MUTED);
-     }
-   if(g_dailyLimitHit)
-      return;
-
-   double dayResult    = g_todayClosed + g_floating;
-   double startBalance = AccountInfoDouble(ACCOUNT_BALANCE) - g_todayClosed;
-   if(startBalance <= 0)
-      return;
-
-   string reason = "";
-   if(InpMaxDailyLossPct > 0 && dayResult <= -startBalance * InpMaxDailyLossPct / 100.0)
-      reason = "Daily loss limit hit";
-   else if(InpDailyTargetPct > 0 && dayResult >= startBalance * InpDailyTargetPct / 100.0)
-      reason = "Daily profit target reached";
-
-   if(reason != "")
-     {
-      g_dailyLimitHit = true;
-      g_dailyLimitDay = today;
-      g_state         = BOT_STOPPED;
-      CloseAll(reason);
-      Msg(reason + ". Locked until tomorrow.", reason == "Daily loss limit hit" ? CLR_RED : CLR_GREEN);
-     }
-  }
-
 void CheckSessionEnd()
   {
    bool open = SessionOpen();
@@ -1171,165 +687,69 @@ void CheckSessionEnd()
   }
 
 //==================================================================
-//  TRADING
+//  EXECUTION
 //==================================================================
-int VolumeDigits(double step)
-  {
-   int d = 0;
-   while(step < 1.0 - 1e-9 && d < 8)
-     {
-      step *= 10.0;
-      d++;
-     }
-   return d;
-  }
-
-// Round a lot size to the broker's step and clamp it to min/max.
-double NormalizeLots(double lots)
-  {
-   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   double step   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   if(step > 0)
-      lots = MathRound(lots / step) * step;
-   if(minLot > 0 && lots < minLot)
-      lots = minLot;
-   if(maxLot > 0 && lots > maxLot)
-      lots = maxLot;
-   return NormalizeDouble(lots, VolumeDigits(step > 0 ? step : 0.01));
-  }
-
-void ChangeLots(const double newLots)
-  {
-   g_lots = NormalizeLots(newLots);
-   ObjectSetString(0, P("e_lot"), OBJPROP_TEXT, DoubleToString(g_lots, 2));
-   if(!MQLInfoInteger(MQL_TESTER))
-      GlobalVariableSet(StateKey() + "_lots", g_lots);
-   Msg("Lot size set to " + DoubleToString(g_lots, 2), CLR_BLUE);
-  }
-
-// Returns 0 if a valid lot size cannot be produced.
-double CalcLots(const double slDistance)
-  {
-   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   double step   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   double lots   = g_lots;
-
-   if(InpLotMode == LOT_RISK_PERCENT)
-     {
-      double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-      double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE_LOSS);
-      if(tickValue <= 0)
-         tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-      if(tickSize <= 0 || tickValue <= 0 || slDistance <= 0)
-         return 0.0;
-      double lossPerLot = slDistance / tickSize * tickValue;
-      double riskMoney  = AccountInfoDouble(ACCOUNT_BALANCE) * InpRiskPercent / 100.0;
-      lots = riskMoney / lossPerLot;
-     }
-
-   if(step > 0)
-      lots = MathFloor(lots / step + 1e-9) * step;
-   if(lots < minLot)
-     {
-      // Small account: the minimum lot risks more than Risk %. Allow it only
-      // while that risk stays within InpMaxRiskAtMinLot.
-      if(InpLotMode != LOT_RISK_PERCENT || InpMaxRiskAtMinLot <= 0)
-         return 0.0;
-      double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-      double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE_LOSS);
-      if(tickValue <= 0)
-         tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-      double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-      if(tickSize <= 0 || tickValue <= 0 || balance <= 0)
-         return 0.0;
-      double riskAtMin = slDistance / tickSize * tickValue * minLot / balance * 100.0;
-      if(riskAtMin > InpMaxRiskAtMinLot)
-         return 0.0;
-      lots = minLot;
-     }
-   if(lots > maxLot)
-      lots = maxLot;
-   return NormalizeDouble(lots, VolumeDigits(step));
-  }
-
-bool OpenTrade(const int dir, const string tag)
-  {
-   return OpenTradeEx(dir, tag, InpStopLoss, InpTakeProfit);
-  }
-
-bool OpenTradeEx(const int dir, const string tag, const double slWanted, const double tpWanted)
+// Opens a trade sized and approved by the risk manager. Returns true only
+// when the broker confirms the deal.
+bool OpenTradeEx(const int dir, const string strategy, const double slWanted, const double tpWanted)
   {
    if(slWanted <= 0)
      {
-      Msg("Stop loss must be greater than 0.", CLR_RED);
+      Reject("trade rejected: no valid stop loss");
       return false;
      }
-
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol, tick))
      {
-      Msg("No price available for " + _Symbol, CLR_RED);
+      Reject("trade rejected: no price for " + _Symbol);
       return false;
      }
 
-   int    digits   = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   double point    = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   double minDist  = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point + (tick.ask - tick.bid);
-   double slDist   = MathMax(slWanted, minDist);
-   double tpDist   = MathMax(tpWanted, minDist);
+   int    digits  = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   double point   = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double minDist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point + (tick.ask - tick.bid);
+   double slDist  = MathMax(slWanted, minDist);   // broker minimum; size is computed on the final stop
+   double tpDist  = (tpWanted > 0) ? MathMax(tpWanted, minDist) : 0.0;
 
-   double lots = CalcLots(slDist);
+   string reason = "";
+   double riskPct = 0.0;
+   double lots = g_risk.SizeTrade(dir, slDist, reason, riskPct);
    if(lots <= 0)
      {
-      Msg("Too small for min lot at this SL. Use a Cent account.", CLR_AMBER);
+      Reject("trade rejected: " + reason);
       return false;
      }
 
-   // Margin check: never use more than (100 - buffer)% of free margin
-   double margin = 0.0;
-   ENUM_ORDER_TYPE otype = (dir > 0) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-   double refPrice = (dir > 0) ? tick.ask : tick.bid;
-   if(OrderCalcMargin(otype, _Symbol, lots, refPrice, margin)
-      && margin > AccountInfoDouble(ACCOUNT_MARGIN_FREE) * (100.0 - InpMarginBuffer) / 100.0)
-     {
-      Msg("Not enough free margin for another trade. Skipped.", CLR_AMBER);
-      return false;
-     }
-
+   string comment = InpTradeComment + ":" + strategy;
    bool   sent;
    double price, sl, tp;
    if(dir > 0)
      {
       price = tick.ask;
       sl    = NormalizeDouble(price - slDist, digits);
-      tp    = (tpWanted > 0) ? NormalizeDouble(price + tpDist, digits) : 0.0;
-      sent  = g_trade.Buy(lots, _Symbol, price, sl, tp, InpTradeComment);
+      tp    = (tpDist > 0) ? NormalizeDouble(price + tpDist, digits) : 0.0;
+      sent  = g_trade.Buy(lots, _Symbol, price, sl, tp, comment);
      }
    else
      {
       price = tick.bid;
       sl    = NormalizeDouble(price + slDist, digits);
-      tp    = (tpWanted > 0) ? NormalizeDouble(price - tpDist, digits) : 0.0;
-      sent  = g_trade.Sell(lots, _Symbol, price, sl, tp, InpTradeComment);
+      tp    = (tpDist > 0) ? NormalizeDouble(price - tpDist, digits) : 0.0;
+      sent  = g_trade.Sell(lots, _Symbol, price, sl, tp, comment);
      }
 
    uint rc = g_trade.ResultRetcode();
-   if(sent && (rc == TRADE_RETCODE_DONE || rc == TRADE_RETCODE_PLACED))
+   if(sent && (rc == TRADE_RETCODE_DONE || rc == TRADE_RETCODE_PLACED) && g_trade.ResultDeal() > 0)
      {
-      g_lastTradeTime = TimeCurrent();
-      int k = ArraySize(g_openTimes);
-      ArrayResize(g_openTimes, k + 1, 64);
-      g_openTimes[k] = TimeCurrent();
-      JournalWrite("OPEN", (long)g_trade.ResultOrder(), (dir > 0 ? "BUY" : "SELL"), tag, lots,
-                   g_trade.ResultPrice(), tick.ask - tick.bid, 0.0, 0.0, "");
-      Msg(StringFormat("%s %s %s lots @ %s", tag, (dir > 0 ? "BUY" : "SELL"),
-                       DoubleToString(lots, 2), DoubleToString(g_trade.ResultPrice(), digits)), CLR_GREEN);
+      JournalWrite("OPEN", (long)g_trade.ResultOrder(), (dir > 0 ? "BUY" : "SELL"), strategy, lots,
+                   g_trade.ResultPrice(), tick.ask - tick.bid, slDist, g_sigATR, riskPct, 0.0, 0.0, reason);
+      Msg(StringFormat("%s %s %s lots @ %s, risk %.1f%%", strategy, (dir > 0 ? "BUY" : "SELL"),
+                       DoubleToString(lots, 2), DoubleToString(g_trade.ResultPrice(), digits), riskPct), CLR_GREEN);
+      g_risk.Update();
       return true;
      }
 
-   Msg(StringFormat("Order failed (%u): %s", rc, g_trade.ResultRetcodeDescription()), CLR_RED);
+   Msg(StringFormat("Order NOT executed (%u): %s", rc, g_trade.ResultRetcodeDescription()), CLR_RED);
    return false;
   }
 
@@ -1375,147 +795,54 @@ int CloseAll(const string why)
          ulong ticket = PositionGetTicket(i);
          if(ticket == 0 || !IsOurs())
             continue;
+         NoteCloseReason(ticket, why);
          if(g_trade.PositionClose(ticket, InpSlippagePoints))
             closed++;
          else
+           {
             failed++;
+            PrintFormat("Close #%I64u failed (%u): %s", ticket, g_trade.ResultRetcode(),
+                        g_trade.ResultRetcodeDescription());
+           }
         }
       if(CountOurPositions() == 0)
          break;
      }
    PrintFormat("CloseAll (%s): closed %d, failed %d", why, closed, failed);
    if(CountOurPositions() > 0)
-      Msg(StringFormat("Close all (%s): some positions could not be closed.", why), CLR_RED);
+      Msg(StringFormat("Close all (%s): some positions could NOT be closed.", why), CLR_RED);
    else
       Msg(StringFormat("Close all (%s): %d position(s) closed.", why, closed), CLR_MUTED);
    return closed;
   }
 
 //==================================================================
-//  STATS
+//  TRADE JOURNAL  (MQL5/Files/XAUScalper_trades.csv)
 //==================================================================
-void RefreshStats()
-  {
-   // Floating P/L of our open positions
-   g_floating = 0.0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-     {
-      if(PositionGetTicket(i) == 0 || !IsOurs())
-         continue;
-      g_floating += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
-     }
-
-   // Closed P/L today (broker server day) for positions opened by this EA
-   g_todayClosed = 0.0;
-   datetime dayStart = iTime(_Symbol, PERIOD_D1, 0);
-   if(dayStart == 0)
-     {
-      long now = (long)TimeCurrent();
-      dayStart = (datetime)(now - now % 86400);
-     }
-   if(!HistorySelect(dayStart, TimeCurrent() + 3600))
-      return;
-
-   int total = HistoryDealsTotal();
-   long ourIds[];
-   int  idCount = 0;
-   ArrayResize(ourIds, 0, 64);
-
-   for(int i = 0; i < total; i++)
-     {
-      ulong deal = HistoryDealGetTicket(i);
-      if(deal == 0)
-         continue;
-      if(HistoryDealGetString(deal, DEAL_SYMBOL) != _Symbol)
-         continue;
-      if(HistoryDealGetInteger(deal, DEAL_ENTRY) == DEAL_ENTRY_IN
-         && HistoryDealGetInteger(deal, DEAL_MAGIC) == InpMagic)
-        {
-         ArrayResize(ourIds, idCount + 1, 64);
-         ourIds[idCount++] = HistoryDealGetInteger(deal, DEAL_POSITION_ID);
-        }
-     }
-
-   double posNet[];
-   bool   posClosed[];
-   ArrayResize(posNet, idCount);
-   ArrayResize(posClosed, idCount);
-   if(idCount > 0)
-     {
-      ArrayInitialize(posNet, 0.0);
-      ArrayInitialize(posClosed, false);
-     }
-
-   for(int i = 0; i < total; i++)
-     {
-      ulong deal = HistoryDealGetTicket(i);
-      if(deal == 0)
-         continue;
-      if(HistoryDealGetString(deal, DEAL_SYMBOL) != _Symbol)
-         continue;
-      long posId = HistoryDealGetInteger(deal, DEAL_POSITION_ID);
-      int  idx   = -1;
-      for(int k = 0; k < idCount; k++)
-         if(ourIds[k] == posId)
-           {
-            idx = k;
-            break;
-           }
-      if(idx < 0)
-         continue;
-
-      double cost = HistoryDealGetDouble(deal, DEAL_COMMISSION) + HistoryDealGetDouble(deal, DEAL_FEE);
-      double amount;
-      if(HistoryDealGetInteger(deal, DEAL_ENTRY) == DEAL_ENTRY_IN)
-         amount = cost;
-      else
-        {
-         amount = HistoryDealGetDouble(deal, DEAL_PROFIT) + HistoryDealGetDouble(deal, DEAL_SWAP) + cost;
-         posClosed[idx] = true;
-        }
-      g_todayClosed += amount;
-      posNet[idx]   += amount;
-     }
-
-   g_tradesToday = 0;
-   g_winsToday   = 0;
-   for(int k = 0; k < idCount; k++)
-     {
-      if(!posClosed[k])
-         continue;
-      g_tradesToday++;
-      if(posNet[k] > 0)
-         g_winsToday++;
-     }
-  }
-
-//==================================================================
-//  TRADE JOURNAL  (MQL5/Files/XAUScalper_journal.csv)
-//==================================================================
-// One row per entry (with the burst that triggered it) and one per exit,
-// so the profile values can be tuned from real results.
-void JournalWrite(const string event, const long position, const string side, const string tag,
-                  const double lots, const double price, const double spread,
-                  const double profit, const double holdSec, const string reason)
+void JournalWrite(const string event, const long position, const string side, const string strategy,
+                  const double lots, const double price, const double spread, const double slDist,
+                  const double atr, const double riskPct, const double profit, const double holdSec,
+                  const string note)
   {
    if(!InpJournal || MQLInfoInteger(MQL_OPTIMIZATION))
       return;
-   string name = "XAUScalper_journal.csv";
-   int h = FileOpen(name, FILE_READ | FILE_WRITE | FILE_CSV | FILE_ANSI | FILE_SHARE_READ, ',');
+   int h = FileOpen("XAUScalper_trades.csv", FILE_READ | FILE_WRITE | FILE_CSV | FILE_ANSI | FILE_SHARE_READ, ',');
    if(h == INVALID_HANDLE)
+     {
+      Print("Journal: cannot open file, error ", GetLastError());
       return;
+     }
    if(FileSize(h) == 0)
-      FileWrite(h, "event", "time", "account", "position", "side", "tag", "strategy", "lots", "price",
-                "spread", "move", "need", "dir_ratio", "ticks", "profit", "hold_s", "reason");
+      FileWrite(h, "event", "time", "account", "position", "side", "strategy", "lots", "price",
+                "spread", "sl_dist", "atr", "risk_pct", "profit", "hold_s", "note");
    FileSeek(h, 0, SEEK_END);
    bool isOpen = (event == "OPEN");
    FileWrite(h, event, TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS),
-             IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)), IntegerToString(position), side, tag,
-             StrategyLabel(), DoubleToString(lots, 2), DoubleToString(price, _Digits),
-             DoubleToString(spread, _Digits),
-             isOpen ? DoubleToString(g_lastMove, 2) : "", isOpen ? DoubleToString(g_lastNeed, 2) : "",
-             isOpen ? DoubleToString(g_lastRatio, 2) : "", isOpen ? IntegerToString(g_lastTicks) : "",
-             isOpen ? "" : DoubleToString(profit, 2), isOpen ? "" : DoubleToString(holdSec, 1), reason);
+             IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)), IntegerToString(position), side, strategy,
+             DoubleToString(lots, 2), DoubleToString(price, _Digits), DoubleToString(spread, _Digits),
+             isOpen ? DoubleToString(slDist, 2) : "", isOpen ? DoubleToString(atr, 2) : "",
+             isOpen ? DoubleToString(riskPct, 2) : "",
+             isOpen ? "" : DoubleToString(profit, 2), isOpen ? "" : DoubleToString(holdSec, 1), note);
    FileClose(h);
   }
 
@@ -1554,12 +881,12 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
    double profit   = HistoryDealGetDouble(trans.deal, DEAL_PROFIT) + HistoryDealGetDouble(trans.deal, DEAL_SWAP)
                      + HistoryDealGetDouble(trans.deal, DEAL_COMMISSION) + HistoryDealGetDouble(trans.deal, DEAL_FEE);
 
-   // Confirm the position was opened by this EA and find its entry time
+   // Confirm the position was opened by this EA; find its entry time and strategy
    if(!HistorySelectByPosition(posId))
       return;
-   bool   ours  = false;
-   long   inMsc = 0;
-   string tag   = "";
+   bool   ours     = false;
+   long   inMsc    = 0;
+   string strategy = "";
    for(int i = 0; i < HistoryDealsTotal(); i++)
      {
       ulong d = HistoryDealGetTicket(i);
@@ -1570,22 +897,24 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
          ours  = true;
          inMsc = HistoryDealGetInteger(d, DEAL_TIME_MSC);
          profit += HistoryDealGetDouble(d, DEAL_COMMISSION) + HistoryDealGetDouble(d, DEAL_FEE);
+         string c = HistoryDealGetString(d, DEAL_COMMENT);
+         int sep = StringFind(c, ":");
+         strategy = (sep >= 0) ? StringSubstr(c, sep + 1) : c;
         }
      }
    if(!ours)
       return;
 
-   // A closing SELL deal closes a BUY position and vice versa
-   string side = (dealType == DEAL_TYPE_SELL) ? "BUY" : "SELL";
+   string side = (dealType == DEAL_TYPE_SELL) ? "BUY" : "SELL";   // a closing SELL closes a BUY
    double hold = (inMsc > 0 && outMsc >= inMsc) ? (outMsc - inMsc) / 1000.0 : 0.0;
-   string why = TakeCloseReason(posId);
+   string why  = TakeCloseReason(posId);
    if(why == "")
      {
       why = DealReasonText(reason);
       if(reason == DEAL_REASON_SL && profit >= 0)
-         why = "trailing/breakeven stop";
+         why = "breakeven stop";
      }
-   JournalWrite("CLOSE", posId, side, tag, lots, price, CurrentSpread(), profit, hold, why);
+   JournalWrite("CLOSE", posId, side, strategy, lots, price, CurrentSpread(), 0.0, 0.0, 0.0, profit, hold, why);
   }
 
 //==================================================================
@@ -1598,6 +927,16 @@ void Msg(const string text, const color clr)
    g_lastMsg      = text;
    g_lastMsgColor = clr;
    Print(text);
+  }
+
+// MT5 chart labels show at most 63 characters.
+string Fit(const string text)
+  {
+   if(text == "")
+      return " ";
+   if(StringLen(text) > 63)
+      return StringSubstr(text, 0, 60) + "...";
+   return text;
   }
 
 void MkRect(const string name, int x, int y, int w, int h, color bg, color border)
@@ -1662,16 +1001,6 @@ void MkButton(const string name, int x, int y, int w, int h, const string text,
    ObjectSetInteger(0, o, OBJPROP_ZORDER, 10);
   }
 
-// MT5 chart labels show at most 63 characters.
-string Fit(const string text)
-  {
-   if(text == "")
-      return " ";
-   if(StringLen(text) > 63)
-      return StringSubstr(text, 0, 60) + "...";
-   return text;
-  }
-
 void SetText(const string name, const string text, color clr)
   {
    string o = P(name);
@@ -1706,7 +1035,7 @@ int ColX(int col)
 bool AlwaysVisible(const string name)
   {
    return name == P("bg") || name == P("header") || name == P("title")
-          || name == P("pill") || name == P("pill_t") || name == P("b_min") || name == P("b_mode");
+          || name == P("pill") || name == P("pill_t") || name == P("b_min") || name == P("mode");
   }
 
 // Collapse the panel to its header bar, or expand it again.
@@ -1731,14 +1060,14 @@ void BuildPanel()
    MkRect("bg",     0, 0, PANEL_W, PANEL_H, CLR_BG, CLR_BORDER);
    MkRect("header", 0, 0, PANEL_W, 36, CLR_HEADER, CLR_BORDER);
    MkLabel("title", 14, 9, "XAU SCALPER", CLR_TEXT, 12, "Arial Bold");
+   MkLabel("mode", 150, 12, "STRATEGY: " + STRATEGY_NAME, CLR_BLUE, 8, "Arial Bold");
    MkRect("pill", PANEL_W - 118, 8, 106, 20, CLR_GREY, CLR_GREY);
    MkLabel("pill_t", PANEL_W - 65, 18, "STOPPED", clrWhite, 8, "Arial Bold", ANCHOR_CENTER);
    MkButton("b_min", PANEL_W - 146, 8, 22, 20, "-", CLR_GREY, clrWhite, 10);
-   MkButton("b_mode", 150, 8, 160, 20, "STRATEGY: PULLBACK", CLR_BLUE, clrWhite, 8);
    MkLabel("info", 14, 44, " ", CLR_MUTED, 8);
 
    // Stats grid (2 rows x 3 columns)
-   string titles[6] = {"BALANCE", "EQUITY", "TODAY P/L", "FLOATING P/L", "SPREAD", "TRADES TODAY"};
+   string titles[6] = {"BALANCE", "EQUITY", "DAY P/L (CLOSED + OPEN)", "FLOATING P/L", "SPREAD", "DRAWDOWN TODAY"};
    for(int i = 0; i < 6; i++)
      {
       int x = 14 + (i % 3) * 178;
@@ -1747,43 +1076,19 @@ void BuildPanel()
       MkLabel("s_v" + IntegerToString(i), x, y + 13, "-", CLR_TEXT, 11, "Arial Bold");
      }
 
-   // Buttons
-   MkRect("sep1", 12, 148, PANEL_W - 24, 1, CLR_BORDER, CLR_BORDER);
-   MkButton("b_start", 12,  158, 90, 32, "START",     CLR_GREEN, clrWhite, 10);
-   MkButton("b_stop",  108, 158, 90, 32, "STOP",      CLR_RED,   clrWhite, 10);
-   MkButton("b_close", 204, 158, 96, 32, "CLOSE ALL", CLR_GREY,  clrWhite, 9);
+   // Risk status (two lines of up to 63 characters)
+   MkLabel("risk1", 14, 146, " ", CLR_MUTED, 8);
+   MkLabel("risk2", 286, 146, " ", CLR_MUTED, 8);
 
-   // Lot size control:  [-] [ 0.01 ] [+]
-   MkLabel("l_lot", 357, 151, "LOT", CLR_MUTED, 7, "Arial", ANCHOR_UPPER);
-   MkButton("b_lminus", 308, 162, 22, 26, "-", CLR_GREY, clrWhite, 10);
-   string eo = P("e_lot");
-   if(ObjectFind(0, eo) < 0)
-      ObjectCreate(0, eo, OBJ_EDIT, 0, 0, 0);
-   ObjectSetInteger(0, eo, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, eo, OBJPROP_XDISTANCE, InpPanelX + 332);
-   ObjectSetInteger(0, eo, OBJPROP_YDISTANCE, InpPanelY + 162);
-   ObjectSetInteger(0, eo, OBJPROP_XSIZE, 50);
-   ObjectSetInteger(0, eo, OBJPROP_YSIZE, 26);
-   ObjectSetInteger(0, eo, OBJPROP_ALIGN, ALIGN_CENTER);
-   ObjectSetInteger(0, eo, OBJPROP_BGCOLOR, CLR_HEADER);
-   ObjectSetInteger(0, eo, OBJPROP_BORDER_COLOR, CLR_BORDER);
-   ObjectSetInteger(0, eo, OBJPROP_COLOR, CLR_TEXT);
-   ObjectSetString(0, eo, OBJPROP_FONT, "Arial Bold");
-   ObjectSetInteger(0, eo, OBJPROP_FONTSIZE, 10);
-   ObjectSetString(0, eo, OBJPROP_TEXT, DoubleToString(g_lots, 2));
-   ObjectSetInteger(0, eo, OBJPROP_READONLY, false);
-   ObjectSetInteger(0, eo, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, eo, OBJPROP_HIDDEN, true);
-   ObjectSetInteger(0, eo, OBJPROP_ZORDER, 10);
-   MkButton("b_lplus", 384, 162, 22, 26, "+", CLR_GREY, clrWhite, 10);
-   if(InpShowManualButtons)
-     {
-      MkButton("b_buy",  414, 158, 55, 32, "BUY",  CLR_BLUE, clrWhite, 9);
-      MkButton("b_sell", 473, 158, 55, 32, "SELL", CLR_BLUE, clrWhite, 9);
-     }
+   // Buttons
+   MkRect("sep1", 12, 166, PANEL_W - 24, 1, CLR_BORDER, CLR_BORDER);
+   MkButton("b_start", 12,  176, 110, 32, "START",     CLR_GREEN,   clrWhite, 10);
+   MkButton("b_stop",  130, 176, 110, 32, "STOP",      CLR_RED,     clrWhite, 10);
+   MkButton("b_close", 248, 176, 120, 32, "CLOSE ALL", CLR_GREY,    clrWhite, 9);
+   MkButton("b_emerg", 376, 176, 152, 32, "EMERGENCY", CLR_DARKRED, clrWhite, 9);
 
    // Positions table
-   MkLabel("t_title", 14, 200, "OPEN POSITIONS (0)", CLR_MUTED, 7, "Arial Bold");
+   MkLabel("t_title", 14, 218, "OPEN POSITIONS (0)", CLR_MUTED, 7, "Arial Bold");
    string heads[7] = {"TICKET", "TYPE", "LOTS", "OPEN", "SL", "TP", "P/L"};
    for(int c = 0; c < 7; c++)
       MkLabel("h" + IntegerToString(c), ColX(c), ROW_Y0 - 4, heads[c], CLR_MUTED, 7,
@@ -1823,8 +1128,8 @@ void UpdatePanel()
    // Status pill
    string status = "STOPPED";
    color  pill   = CLR_GREY;
-   if(!connected)               { status = "OFFLINE"; pill = CLR_RED;   }
-   else if(g_dailyLimitHit)     { status = "LOCKED";  pill = CLR_RED;   }
+   if(!connected)                  { status = "OFFLINE"; pill = CLR_RED;   }
+   else if(g_risk.Locked())        { status = "LOCKED";  pill = CLR_RED;   }
    else if(g_state == BOT_RUNNING) { status = "RUNNING"; pill = CLR_GREEN; }
    else if(g_state == BOT_PAUSED)  { status = "PAUSED";  pill = CLR_AMBER; }
    ObjectSetInteger(0, P("pill"), OBJPROP_BGCOLOR, pill);
@@ -1836,26 +1141,25 @@ void UpdatePanel()
 
    // Stats
    double spread = CurrentSpread();
+   double dd     = g_risk.DrawdownPct();
    SetText("s_v0", Money(AccountInfoDouble(ACCOUNT_BALANCE)) + " " + currency, CLR_TEXT);
    SetText("s_v1", Money(AccountInfoDouble(ACCOUNT_EQUITY)) + " " + currency, CLR_TEXT);
-   SetText("s_v2", Signed(g_todayClosed + g_floating), PLColor(g_todayClosed + g_floating));
-   SetText("s_v3", Signed(g_floating), PLColor(g_floating));
-   SetText("s_v4", DoubleToString(spread, _Digits),
-           (InpMaxSpread > 0 && spread > InpMaxSpread) ? CLR_RED : CLR_TEXT);
-   if(g_tradesToday > 0)
-      SetText("s_v5", StringFormat("%d  (%d%% win)", g_tradesToday, (int)MathRound(100.0 * g_winsToday / g_tradesToday)),
-              g_winsToday * 2 >= g_tradesToday ? CLR_GREEN : CLR_RED);
-   else
-      SetText("s_v5", "0", CLR_TEXT);
+   SetText("s_v2", Signed(g_risk.DayPL()), PLColor(g_risk.DayPL()));
+   SetText("s_v3", Signed(g_risk.Floating()), PLColor(g_risk.Floating()));
+   SetText("s_v4", DoubleToString(spread, _Digits), (InpMaxSpread > 0 && spread > InpMaxSpread) ? CLR_RED : CLR_TEXT);
+   SetText("s_v5", DoubleToString(dd, 2) + "%", dd > 0 ? CLR_RED : CLR_TEXT);
 
-   // Profile button
-   color modeClr = CLR_GREY;
-   if(g_strategy == STRAT_CONTINUOUS)       modeClr = CLR_GREEN;
-   else if(g_strategy == STRAT_PULLBACK)    modeClr = CLR_BLUE;
-   else if(g_profile == PROFILE_AGGRESSIVE) modeClr = CLR_RED;
-   ObjectSetString(0, P("b_mode"), OBJPROP_TEXT, StrategyLabel());
-   ObjectSetInteger(0, P("b_mode"), OBJPROP_BGCOLOR, modeClr);
-   ObjectSetInteger(0, P("b_mode"), OBJPROP_BORDER_COLOR, modeClr);
+   // Risk status
+   double used = g_risk.DayLossUsedPct();
+   string r1 = StringFormat("Risk %.1f%%/trade   Daily loss limit used: %.0f%%", g_risk.RiskPct(), used);
+   if(g_risk.MaxDailyLossPct() <= 0)
+      r1 = StringFormat("Risk %.1f%%/trade   Daily loss limit: OFF", g_risk.RiskPct());
+   string r2 = StringFormat("Losses in a row %d/%d   Trades %d/%d   Wins %d/%d",
+                            g_risk.ConsecLosses(), g_risk.MaxConsecLosses(),
+                            g_risk.EntriesToday(), g_risk.MaxDailyTrades(),
+                            g_risk.WinsToday(), g_risk.ClosedToday());
+   SetText("risk1", r1, used >= 100 ? CLR_RED : (used >= 50 ? CLR_AMBER : CLR_MUTED));
+   SetText("risk2", r2, (g_risk.MaxConsecLosses() > 0 && g_risk.ConsecLosses() >= g_risk.MaxConsecLosses()) ? CLR_RED : CLR_MUTED);
 
    // Positions table
    int row = 0, total = 0;
@@ -1898,28 +1202,21 @@ void UpdatePanel()
    SetText("t_title", tTitle, CLR_MUTED);
    ShowObj("t_empty", total == 0);
 
-   // Footer
+   // Footer: last action, and why the bot is or is not trading right now
    SetText("f_msg", g_lastMsg, g_lastMsgColor);
    string cond;
-   if(g_state == BOT_RUNNING)
+   if(g_risk.Locked())
+      cond = "Locked: " + g_risk.LockText();
+   else if(g_state == BOT_RUNNING)
      {
-      string why = BlockReason();
-      bool soft = (why == "" || why == "max open positions reached" || why == "cooldown after last trade");
-      if(g_strategy == STRAT_CONTINUOUS)
-         cond = "Continuous: " + g_ctStatus;
-      else if(g_strategy == STRAT_PULLBACK)
-         cond = soft ? "Pullback: " + g_pbStatus : "Waiting: " + why;
-      else if(soft)
-         cond = StringFormat("Scanning: %ss move %s%s (need %s)", DoubleToString(g_p.windowMs / 1000.0, 1),
-                             g_lastMove >= 0 ? "+" : "", DoubleToString(g_lastMove, 2), DoubleToString(g_lastNeed, 2));
-      else
-         cond = "Waiting: " + why;
+      string why = EntryBlockReason();
+      cond = (why == "") ? "Pullback: " + g_pbStatus : "Not trading: " + why;
      }
    else if(g_state == BOT_PAUSED)
       cond = "Paused after reconnect. Press START to resume.";
    else
-      cond = "Bot is stopped. No new trades will be opened.";
-   SetText("f_cond", cond, CLR_MUTED);
+      cond = "Stopped. No new trades will be opened.";
+   SetText("f_cond", cond, g_risk.Locked() ? CLR_RED : CLR_MUTED);
 
    ChartRedraw();
   }
