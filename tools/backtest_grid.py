@@ -35,7 +35,7 @@ DEFAULTS = dict(
     balance=500.0,
     ema_fast=21, ema_slow=55, flat_gap_atr=0.10,
     lot=0.01, spacing=3.00, max_levels=8,
-    pos_tp=4.0, pos_cut=5.0, basket_tp=12.0, basket_stop=18.0,
+    pos_tp=4.0, pos_cut=3.0, basket_tp=12.0, basket_stop=18.0,
     daily_loss_pct=4.0,
     contract_size=100.0,     # oz per lot
     spread=0.25,

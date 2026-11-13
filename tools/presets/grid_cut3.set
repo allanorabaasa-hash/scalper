@@ -1,0 +1,12 @@
+; XAUScalper Controlled Grid, loss cut -$3 (compare in the Strategy Tester)
+InpEmaFast=21
+InpEmaSlow=55
+InpFlatGapAtr=0.10
+InpLot=0.01
+InpSpacing=3.00
+InpMaxLevels=8
+InpPosTP=4.0
+InpPosLossCut=3
+InpBasketTP=12.0
+InpBasketStop=18.0
+InpDailyLossPct=0

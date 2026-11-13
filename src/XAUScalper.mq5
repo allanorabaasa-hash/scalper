@@ -4,9 +4,9 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "12.00"
+#property version   "12.10"
 #property description "Controlled Grid: daily EMA 21/55 direction, 0.01 every $3 against, max 8 levels."
-#property description "Each position: TP +$4 / loss cut -$5 (on the server). Basket: TP +$12, stop -$18. Daily limit 4%."
+#property description "Each position: TP +$4 / loss cut -$3 (on the server). Basket: TP +$12, stop -$18. Daily limit 4%."
 
 #include <XAUScalper\RiskManager.mqh>
 #include <XAUScalper\Execution.mqh>
@@ -27,7 +27,7 @@ input int             InpMaxLevels          = 8;             // Maximum levels p
 
 input group "Exits"
 input double          InpPosTP              = 4.0;           // Individual take profit: close a position at +USD
-input double          InpPosLossCut         = 5.0;           // Early loss cut: close a position at -USD
+input double          InpPosLossCut         = 3.0;           // Early loss cut: close a position at -USD (was 5)
 input double          InpBasketTP           = 12.0;          // Basket take profit: close all at +USD floating
 input double          InpBasketStop         = 18.0;          // Hard basket stop: close all at -USD floating
 

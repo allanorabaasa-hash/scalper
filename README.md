@@ -12,7 +12,7 @@ strategies are in git history only.
 | No new grid | daily EMAs crossing or flat (gap < 0.10 x daily ATR 14) |
 | Grid | first 0.01 position at once; one more 0.01 every **$3.00** against the last level; max **8** levels; lot never increased |
 | Individual take profit | each position closes at **+$4** (set on the broker's server) |
-| Early loss cut | each position closes at **-$5**, that position only (set on the broker's server) |
+| Early loss cut | each position closes at **-$3** (was -$5 in v12.00), that position only (set on the broker's server) |
 | Basket take profit | total floating **+$12**: close all |
 | Hard basket stop | total floating **-$18**: close all |
 | Grid end | when it has no open positions; the next grid starts right away, until STOP |
@@ -23,9 +23,10 @@ Every position carries its own TP and loss cut on the broker's server, so they w
 MT5 or the internet is down. The basket rules need MT5 running.
 
 Notes on how the rules interact (no rule changed):
-- Each position is cut at -$5, so the floating loss rarely reaches -$18; but cut losses add up:
-  a grid that uses all 8 levels against the trend can lose 8 x $5 = **$40 (8%)**.
-- With +$4 wins and -$5 cuts, positions need to win more than 5 / 9 = **56%** (plus spread).
+- Each position is cut early, so the floating loss rarely reaches -$18; but cut losses add up:
+  a grid that uses all 8 levels against the trend can lose 8 x $3 = **$24** (8 x $5 = $40 at a -$5 cut).
+- With +$4 wins and -$3 cuts, positions need to win more than 3 / 7 = **43%** (56% at -$5).
+- Compare cut sizes in the Strategy Tester with `grid_cut5.set`, `grid_cut4.set`, `grid_cut3.set`, `grid_cut2.5.set`.
 - A position at +$4 closes before the basket can reach +$12, so the basket TP fires rarely.
 
 ## MT5 setup (Kali + Wine)

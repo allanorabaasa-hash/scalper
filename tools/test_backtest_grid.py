@@ -24,7 +24,7 @@ def bars_from(path):
                          "low": np.minimum(open_, close), "close": close})
 
 
-P = dict(spread=0.0, daily_loss_pct=0)
+P = dict(spread=0.0, daily_loss_pct=0, pos_cut=5.0)   # tests written for the -$5 cut
 
 
 class Rules(unittest.TestCase):
