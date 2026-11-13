@@ -1,0 +1,8 @@
+InpMode=10
+InpTestingMode=true
+InpG_Lot=0.01
+InpG_Waves=10,15,20
+InpG_TakeProfit=0.5
+InpG_NextWavePct=50
+InpG_MaxOpen=60
+InpG_BasketStopPct=0

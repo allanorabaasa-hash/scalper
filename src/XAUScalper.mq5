@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "6.00"
+#property version   "6.10"
 #property description "Five strategies selected by a market regime detector."
 #property description "Every entry is approved and sized by an independent risk manager."
 
@@ -168,6 +168,16 @@ input int           InpS8_TrendEMA          = 50;            // Trend filter EMA
 input double        InpS8_StopATR           = 2.0;           // Initial stop (x ATR of the entry timeframe)
 input double        InpS8_TrailStartR       = 1.0;           // Trailing starts at (x risk)
 input double        InpS8_TrailATR          = 3.0;           // Trailing distance (x ATR)
+
+input group "Grid / hedge waves (Mode = Grid; user strategy; DEMO and TESTER only)"
+input double        InpG_Lot                = 0.01;          // Lot per position (fixed)
+input string        InpG_Waves              = "10,15,20";    // Positions per wave (half buys, half sells); the last size repeats
+input double        InpG_TakeProfit         = 0.50;          // Close a position when its profit reaches this (account currency)
+input double        InpG_NextWavePct        = 50;            // Open the next wave when this % of the current wave has closed in profit
+input int           InpG_MaxOpen            = 60;            // Max grid positions open at once
+input double        InpG_MinMarginLevel     = 300;           // No new positions below this margin level % (0 = off)
+input int           InpG_MaxHoldMin         = 0;             // Close any grid position older than N minutes (0 = off: losers wait)
+input double        InpG_BasketStopPct      = 0;             // Close ALL grid positions if equity is this % below balance (0 = off)
 
 input group "Connection safety"
 input bool          InpPauseOnReconnect     = true;          // Pause bot after a connection drop
@@ -413,6 +423,7 @@ int OnInit()
      }
 
    g_exec.Init(_Symbol, InpMagic, InpSlippagePoints);
+   GridInit();
    JournalInit(InpJournal);
 
    RiskConfig cfg;
@@ -503,6 +514,185 @@ void OnDeinit(const int reason)
 //==================================================================
 //  MAIN LOOP
 //==================================================================
+//==================================================================
+//  GRID / HEDGE WAVES (user strategy)
+//==================================================================
+// Opens waves of fixed-lot positions, half buys and half sells, without stop
+// losses. Each position closes when its profit reaches InpG_TakeProfit; losing
+// positions are held. The next wave opens when InpG_NextWavePct of the current
+// wave has closed in profit. Runs only on demo accounts and in the tester.
+int      g_gridSizes[];
+int      g_gridWaveIdx    = -1;    // index into g_gridSizes
+int      g_gridWave       = 0;     // wave number (comment tag)
+int      g_gridOpened     = 0;     // positions opened in the current wave
+int      g_gridClosedWins = 0;     // positions closed in profit (this session)
+datetime g_gridLast       = 0;
+string   g_gridStatus     = "grid: not started";
+
+void GridInit()
+  {
+   string parts[];
+   int n = StringSplit(InpG_Waves, ',', parts);
+   ArrayResize(g_gridSizes, 0);
+   for(int i = 0; i < n; i++)
+     {
+      string t = parts[i];
+      StringTrimLeft(t);
+      StringTrimRight(t);
+      int v = (int)StringToInteger(t);
+      if(v > 0)
+        {
+         int k = ArraySize(g_gridSizes);
+         ArrayResize(g_gridSizes, k + 1);
+         g_gridSizes[k] = v;
+        }
+     }
+   if(ArraySize(g_gridSizes) == 0)
+     {
+      ArrayResize(g_gridSizes, 1);
+      g_gridSizes[0] = 10;
+     }
+  }
+
+bool IsGridPos()   // after PositionGetTicket / PositionSelect
+  {
+   return IsOurs() && StringFind(PositionGetString(POSITION_COMMENT), ":GRID") >= 0;
+  }
+
+int GridCount(const int wave, int &buys, int &sells)
+  {
+   buys = 0;
+   sells = 0;
+   string tag = ":GRID:" + IntegerToString(wave);
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(PositionGetTicket(i) == 0 || !IsGridPos())
+         continue;
+      string c = PositionGetString(POSITION_COMMENT);
+      if(wave > 0 && StringFind(c, tag) < 0)
+         continue;
+      if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+         buys++;
+      else
+         sells++;
+     }
+   return buys + sells;
+  }
+
+void GridEngine(const bool allowNew)
+  {
+   datetime now = TimeCurrent();
+
+   // 1. Take profit on every grid position that reached the target; optional max hold
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(t == 0 || !IsGridPos())
+         continue;
+      double net = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+      double ageMin = (double)(now - (datetime)PositionGetInteger(POSITION_TIME)) / 60.0;
+      string why = "";
+      if(net >= InpG_TakeProfit)
+         why = "grid take profit";
+      else if(InpG_MaxHoldMin > 0 && ageMin >= InpG_MaxHoldMin)
+         why = "grid max hold";
+      if(why == "")
+        continue;
+      string err;
+      NoteCloseReason(t, why);
+      if(g_exec.Close(t, err))
+        {
+         if(why == "grid take profit")
+            g_gridClosedWins++;
+        }
+      else
+         Print(err);
+     }
+
+   // 2. Optional basket stop
+   double bal = AccountInfoDouble(ACCOUNT_BALANCE);
+   double eq  = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(InpG_BasketStopPct > 0 && bal > 0 && (bal - eq) / bal * 100.0 >= InpG_BasketStopPct)
+     {
+      CloseAll("grid basket stop");
+      g_state = BOT_STOPPED;
+      GlobalVariableSet(ManualStopKey(), 1);
+      Msg(StringFormat("GRID BASKET STOP: equity %.1f%% below balance, all closed, bot stopped.",
+                       (bal - eq) / bal * 100.0), CLR_RED);
+      return;
+     }
+
+   int b, s;
+   int open = GridCount(0, b, s);
+   int inWave = (g_gridWave > 0) ? GridCount(g_gridWave, b, s) : 0;
+   int waveSize = (g_gridWaveIdx >= 0) ? g_gridSizes[g_gridWaveIdx] : 0;
+   int closedInWave = g_gridOpened - inWave;
+   GridCount(0, b, s);
+   g_gridStatus = StringFormat("GRID wave %d (%d/%d open), total %d (B%d/S%d), wins %d, float %+.2f",
+                               g_gridWave, inWave, waveSize, open, b, s, g_gridClosedWins, eq - bal);
+   if(!allowNew || now == g_gridLast)
+      return;
+   g_gridLast = now;
+
+   // 3. Conditions for opening
+   string block = PlatformBlockReason();
+   if(block != "")
+     {
+      g_gridStatus = "GRID not trading: " + block;
+      return;
+     }
+   if(!MQLInfoInteger(MQL_TESTER) && AccountInfoInteger(ACCOUNT_TRADE_MODE) == ACCOUNT_TRADE_MODE_REAL)
+     {
+      g_gridStatus = "GRID mode is disabled on REAL accounts (no stop losses)";
+      return;
+     }
+   if(g_risk.Locked())
+      return;
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick) || (InpMaxSpread > 0 && tick.ask - tick.bid > InpMaxSpread))
+     {
+      g_gridStatus = "GRID waiting: spread too high";
+      return;
+     }
+
+   // 4. Next wave when enough of the current wave closed in profit
+   bool startWave = (g_gridWave == 0)
+                    || (g_gridOpened >= waveSize && closedInWave * 100.0 >= InpG_NextWavePct * waveSize);
+   if(startWave)
+     {
+      g_gridWaveIdx = MathMin(g_gridWaveIdx + 1, ArraySize(g_gridSizes) - 1);
+      g_gridWave++;
+      g_gridOpened = 0;
+      waveSize = g_gridSizes[g_gridWaveIdx];
+      Msg(StringFormat("GRID: wave %d, %d positions", g_gridWave, waveSize), CLR_BLUE);
+     }
+
+   // 5. Fill the current wave (half buys, half sells), within limits
+   while(g_gridOpened < waveSize)
+     {
+      if(GridCount(0, b, s) >= InpG_MaxOpen)
+        {
+         g_gridStatus = StringFormat("GRID: max %d open positions reached", InpG_MaxOpen);
+         return;
+        }
+      if(InpG_MinMarginLevel > 0 && AccountInfoDouble(ACCOUNT_MARGIN) > 0
+         && AccountInfoDouble(ACCOUNT_MARGIN_LEVEL) < InpG_MinMarginLevel)
+        {
+         g_gridStatus = StringFormat("GRID: margin level below %.0f%%, no new positions", InpG_MinMarginLevel);
+         return;
+        }
+      int dir = (g_gridOpened % 2 == 0) ? 1 : -1;
+      string err;
+      ulong pos = g_exec.OpenNoStop(dir, InpG_Lot, InpTradeComment + ":GRID:" + IntegerToString(g_gridWave), err);
+      if(pos == 0)
+        {
+         Msg("GRID: " + err, CLR_RED);
+         return;   // retry next second
+        }
+      g_gridOpened++;
+     }
+  }
+
 void OnTick()
   {
    if(MQLInfoInteger(MQL_TESTER))
@@ -517,6 +707,11 @@ void OnTick()
             ApplyEmergency();
         }
      }
+   if(InpMode == MODE_GRID)
+     {
+      GridEngine(g_state == BOT_RUNNING);   // take-profits run even when stopped
+      return;
+     }
    g_regime.Update();
    ManagePositions();          // runs even when stopped: open trades stay managed
    if(g_state == BOT_RUNNING)
@@ -528,8 +723,13 @@ void OnTimer()
    CheckConnection();
    CheckAutoStart();
    g_filters.Update();
-   g_regime.Update();
-   ManagePositions();
+   if(InpMode == MODE_GRID)
+      GridEngine(g_state == BOT_RUNNING);
+   else
+     {
+      g_regime.Update();
+      ManagePositions();
+     }
    if(g_risk.Update())
       ApplyEmergency();
    if(!MQLInfoInteger(MQL_TESTER))
@@ -543,6 +743,11 @@ void OnTimer()
 // Which strategy may trade now ("" status explains when none).
 int ActiveStrategy(string &why)
   {
+   if(InpMode == MODE_GRID)
+     {
+      why = g_gridStatus;
+      return STRAT_NONE;
+     }
    ENUM_REGIME rg = g_regime.Regime();
    if(rg == REGIME_DANGER)
      {
@@ -1441,7 +1646,8 @@ void UpdatePanel()
 
    // Header
    string mode = (InpMode == MODE_AUTO) ? "AUTO (regime selects)"
-                 : (InpMode == MODE_ALL) ? "ALL STRATEGIES (testing)" : "ONLY " + StrategyCode(StrategyForMode(InpMode));
+                 : (InpMode == MODE_ALL) ? "ALL STRATEGIES (testing)"
+                 : (InpMode == MODE_GRID) ? "GRID WAVES (demo only)" : "ONLY " + StrategyCode(StrategyForMode(InpMode));
    SetText("mode", mode, CLR_BLUE);
    string status = "STOPPED";
    color  pill   = CLR_GREY;
@@ -1556,6 +1762,8 @@ void UpdatePanel()
       cond = "Locked: " + g_risk.LockText();
       condClr = CLR_RED;
      }
+   else if(g_state == BOT_RUNNING && InpMode == MODE_GRID)
+      cond = g_gridStatus;
    else if(g_state == BOT_RUNNING)
      {
       string pre = PreEntryBlock();

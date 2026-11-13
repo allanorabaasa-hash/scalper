@@ -41,7 +41,8 @@ enum ENUM_STRATEGY_MODE
    MODE_ALL      = 6,   // All strategies scan, first valid signal trades (testing)
    MODE_FVG      = 7,   // Only Strategy 6: fair value gap retracement
    MODE_SRBOUNCE = 8,   // Only Strategy 7: support/resistance bounce
-   MODE_TREND    = 9    // Only Strategy 8: H1 trend following
+   MODE_TREND    = 9,   // Only Strategy 8: H1 trend following
+   MODE_GRID     = 10   // Grid/hedge waves, no stop loss (user strategy, DEMO/TESTER only)
   };
 
 // A trade proposal from a strategy. Numbers only, so it can be copied safely.

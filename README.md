@@ -35,6 +35,14 @@ portable Wine staging build.
   a loss and the emergency drawdown lock are OFF. Per-trade risk (0.5%), stops, margin checks and
   the real-account guard stay on. **Turn testing mode off before any real-money trading.**
 
+## Grid waves mode (user strategy, demo and tester only)
+
+*Mode = Grid*: waves of fixed 0.01-lot positions (default 10, 15, 20, then 20 repeating), half
+buys and half sells, **no stop loss**. Each position closes at +0.50 profit; losing positions are
+held. The next wave opens when 50% of the current wave has closed in profit. Limits: 60 positions,
+no new positions below 300% margin level, optional basket stop and max holding time. Refuses to
+run on a real account. Preset: `tools/presets/grid_user.set`.
+
 ## Strategies (regime -> strategy)
 
 | Regime | Strategy |

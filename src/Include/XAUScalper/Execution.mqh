@@ -115,6 +115,38 @@ public:
       return pos;
      }
 
+   // Market order WITHOUT stop loss or take profit (grid mode only, demo/tester).
+   ulong             OpenNoStop(const int dir, const double lots, const string comment, string &err)
+     {
+      err = "";
+      if(m_busy)
+        {
+         err = "another order is still being processed";
+         return 0;
+        }
+      MqlTick tick;
+      if(!SymbolInfoTick(m_sym, tick))
+        {
+         err = "no price";
+         return 0;
+        }
+      m_busy = true;
+      bool sent = (dir > 0) ? m_trade.Buy(lots, m_sym, tick.ask, 0, 0, comment)
+                            : m_trade.Sell(lots, m_sym, tick.bid, 0, 0, comment);
+      m_busy = false;
+      uint rc = m_trade.ResultRetcode();
+      ulong deal = m_trade.ResultDeal();
+      if(!sent || (rc != TRADE_RETCODE_DONE && rc != TRADE_RETCODE_PLACED) || deal == 0)
+        {
+         err = StringFormat("order not executed (%u: %s)", rc, m_trade.ResultRetcodeDescription());
+         return 0;
+        }
+      ulong pos = 0;
+      if(HistoryDealSelect(deal))
+         pos = (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
+      return (pos > 0) ? pos : m_trade.ResultOrder();
+     }
+
    bool              Close(const ulong ticket, string &err)
      {
       err = "";
