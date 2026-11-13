@@ -1,3 +1,6 @@
+> **Archived (v7.00):** these strategies were removed from the EA; the code is in git history at
+> commit 2472c77 (v6.10). The EA now runs the grid waves strategy only (see README).
+
 # Phases C to G: strategies, regime, coordination, execution, dashboard
 
 Status: **code complete, not yet compiled or run.** MetaEditor and the Strategy Tester run only

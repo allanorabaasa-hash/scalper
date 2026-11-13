@@ -1,126 +1,66 @@
 # scalper
 
-XAUUSD Expert Advisor for MetaTrader 5: five strategies selected by a market regime detector,
-an independent risk manager, and an on-chart control panel. Runs on Kali Linux through a
-portable Wine staging build.
+XAUUSD Expert Advisor for MetaTrader 5 with one strategy: **grid waves**. Runs on Kali Linux
+through a portable Wine staging build, with an on-chart control panel.
 
-> **No strategy has been validated yet.** The code for all phases is written; compiling,
-> backtesting and demo testing happen on the user's PC (see the plan below). Use a **demo
-> account** until `docs/VALIDATION.md` says otherwise. The EA refuses entries on a real account
-> unless *Allow trading on a REAL account* is set.
+> **Demo and Strategy Tester only.** Positions have no stop loss and losing positions are held,
+> so a strong one-way move can lead to a margin call. The EA refuses to open positions on a REAL
+> account.
 
-## Plan and status
+## Strategy (defaults = the user's settings)
 
-| Phase | Content | Status | Report |
-|---|---|---|---|
-| A | Audit of the old bot | Done | [`docs/AUDIT.md`](docs/AUDIT.md) |
-| B | Independent risk manager | Code complete; awaiting compile + unit tests | [`docs/PHASE_B.md`](docs/PHASE_B.md) |
-| C | Five strategies as modules | Code complete; awaiting compile + unit tests | [`docs/PHASES_C_TO_G.md`](docs/PHASES_C_TO_G.md) |
-| D | Market regime detector | Code complete | same |
-| E | Strategy coordination | Code complete | same |
-| F | Execution, filters, position management | Code complete | same |
-| G | Dashboard | Code complete | same |
-| H | Backtests, out-of-sample, walk-forward | Tools and procedure ready; to be run | [`docs/VALIDATION.md`](docs/VALIDATION.md) |
-| I | Demo forward test | Procedure ready; to be run | same |
-| J | Controlled live deployment | Checklist ready | same |
+- No indicators: trading starts as soon as the EA is running and connected.
+- Fixed lot **0.01** per position.
+- Waves of **10, then 15, then 20** positions (20 repeats), half buys and half sells, opened together.
+- Each position closes as soon as its profit reaches **+0.50**. Losing positions are held until
+  they turn profitable.
+- The next wave opens when **50%** of the current wave has closed in profit.
+- Limits: max **60** open positions; no new positions below **300%** margin level or above
+  **0.40** spread; emergency close-all below **100%** margin level.
+- Optional (off by default): max holding time (`InpMaxHoldMin`) and basket stop
+  (`InpBasketStopPct`, close all when equity is that % below balance).
 
-## Current defaults: testing phase
-
-- **Default (v6.00): Strategy 8, H1 trend following, alone.** All M5 strategies failed the
-  out-of-sample test (July-September) and are off. Results: `docs/VALIDATION.md`.
-- **Mode = All strategies:** every enabled strategy scans each new bar and the first valid signal
-  trades. More trades and per-strategy results for finding the profitable ones. Switch *Mode* to
-  **Auto** to let the regime detector choose.
-- **Testing mode = on:** daily loss limit, losses-in-a-row stop, daily trade cap, cooldown after
-  a loss and the emergency drawdown lock are OFF. Per-trade risk (0.5%), stops, margin checks and
-  the real-account guard stay on. **Turn testing mode off before any real-money trading.**
-
-## Grid waves mode (user strategy, demo and tester only)
-
-*Mode = Grid*: waves of fixed 0.01-lot positions (default 10, 15, 20, then 20 repeating), half
-buys and half sells, **no stop loss**. Each position closes at +0.50 profit; losing positions are
-held. The next wave opens when 50% of the current wave has closed in profit. Limits: 60 positions,
-no new positions below 300% margin level, optional basket stop and max holding time. Refuses to
-run on a real account. Preset: `tools/presets/grid_user.set`.
-
-## Strategies (regime -> strategy)
-
-| Regime | Strategy |
-|---|---|
-| Trending | 1. EMA trend pullback (M15 trend, M5 setup, M1 confirmation) |
-| Breakout | 2. Support/resistance breakout + retest |
-| Ranging | 3. RSI + Bollinger mean reversion |
-| Reversal | 4. Liquidity sweep + market structure shift |
-| Strong momentum | 5. Momentum scalping |
-| Unclear / dangerous | wait |
-
-Exact rules: [`docs/PHASES_C_TO_G.md`](docs/PHASES_C_TO_G.md).
-
-## Risk rules (inputs)
-
-Risk 0.5% of equity per trade, daily loss limit 2%, max 3 losses in a row, max 10 trades per day,
-1 position, 60 s between trades, 15 min after a loss, emergency at 15% drawdown or margin level
-below 150%. Never martingale, grid, doubling or widening stops.
+Every setting is an input; `tools/presets/grid_user.set` holds the same values.
+The previous indicator strategies (v6.10) are in git history at commit `2472c77`.
 
 ## Layout
 
 ```
-src/XAUScalper.mq5                 EA: engine, position manager, panel, tester hooks
-src/Include/XAUScalper/*.mqh       risk, strategies, regime, filters, execution, journal
-tests/RiskTests.mq5                unit tests (MT5 script)
-tests/StrategyTests.mq5            unit tests (MT5 script)
+src/XAUScalper.mq5                 EA: grid engine, panel, journal hooks
+src/Include/XAUScalper/*.mqh       risk manager, execution, journal
+tests/RiskTests.mq5                risk maths unit tests (MT5 script)
 tools/analyze_trades.py            performance report from the journal (+ unit tests)
-tools/presets/*.set                Strategy Tester presets
-scripts/install.sh                 copy + compile into every MT5 install
-scripts/start.sh, stop.sh          start / stop the MT5 terminals
-docs/                              audit, phase reports, validation procedure
+tools/presets/grid_user.set        Strategy Tester preset
+scripts/                           install, start/stop MT5, auto-start
 ```
 
 ## Setup (Kali + Wine)
 
-Wine: portable Wine staging 11.21 in `~/wine-staging`, MT5 prefix in `~/.mt5`.
-
 ```bash
-git clone https://github.com/allanorabaasa-hash/scalper.git ~/scalper
-cd ~/scalper
-chmod +x scripts/*.sh
+cd ~/scalper && git pull
 ./scripts/install.sh
 ```
 
-In MetaEditor (F4 in MT5) compile with F7: `Experts/XAUScalper.mq5`,
-`Scripts/XAUScalper/RiskTests.mq5`, `Scripts/XAUScalper/StrategyTests.mq5`.
-Run both test scripts on any chart: they must report 0 failed (RiskTests 30, StrategyTests 34).
-
-Attach **XAUScalper** to the gold chart (Common tab: *Allow Algo Trading*), turn on the
-**Algo Trading** toolbar button, press **START**.
-
-## Auto-start
-
-- **In the EA** (input *Auto-start*, on by default): the bot starts trading by itself whenever MT5
-  is connected to the broker, after MT5 opens, after the internet returns, and on the next trading
-  day after a risk lock. Pressing **STOP** or **EMERGENCY** is remembered, even across restarts:
-  auto-start stays off until you press **START** again. Risk locks always take priority.
-- **On Kali:** `./scripts/install-autostart.sh` registers `scripts/autostart.sh` to run at login.
-  It waits for the internet, starts MT5, and restarts MT5 within a minute if it closes.
-  Log: `~/scalper/autostart.log`. Remove with `./scripts/install-autostart.sh --remove`.
-  `./scripts/stop.sh` stops both the watchdog and MT5.
-
-MT5 reopens the chart with the EA attached as long as the chart and the **Algo Trading**
-button were left on when MT5 last closed.
+In MetaEditor (F4 in MT5) open `Experts/XAUScalper.mq5` and compile with F7. Attach
+**XAUScalper** to **one** XAUUSD (e.g. `XAUUSDm`) M1 chart, tick *Allow Algo Trading*, and turn
+on the **Algo Trading** toolbar button. With auto-start on, wave 1 opens immediately.
 
 ## Panel
 
-START, STOP (no new trades; open trades stay managed), CLOSE ALL, EMERGENCY (stop, lock until
-the next trading day, apply the emergency policy). It shows account and risk status, regime and
-active strategy, news status, open positions, recent trades, per-strategy performance, and why
-the bot is not trading at any moment.
+START, STOP (no new positions; open ones still close at +0.50), CLOSE ALL, EMERGENCY (close all,
+lock until the next trading day). Shows balance, equity, day and floating P/L, spread, margin
+level, the current wave, open positions (close button per row) and why the bot is not trading.
 
-## Journal and analysis
+## Auto-start
 
-Trades are logged to `.../MetaQuotes/Terminal/Common/Files/XAUScalper_trades.csv`
-(Strategy Tester: `XAUScalper_tester_trades.csv`).
+The EA starts by itself whenever MT5 is connected. STOP or EMERGENCY is remembered until you press
+START. On Kali, `./scripts/install-autostart.sh` starts MT5 at login once the internet is up.
+
+## Journal
+
+`.../MetaQuotes/Terminal/Common/Files/XAUScalper_trades.csv` (tester:
+`XAUScalper_tester_trades.csv`).
 
 ```bash
-python3 tools/analyze_trades.py "<Common/Files>/XAUScalper_tester_trades.csv" --split 2026-08-01 --folds 4
-python3 -m unittest tools/test_analyze_trades.py
+python3 tools/analyze_trades.py "<Common/Files>/XAUScalper_trades.csv" --mode demo
 ```

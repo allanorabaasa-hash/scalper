@@ -43,6 +43,9 @@ compile() {   # $1 = .mq5 file, $2 = MQL5 folder
 for mql5 in "${MQL5_DIRS[@]}"; do
   echo "==> $mql5"
   mkdir -p "$mql5/Include/XAUScalper" "$mql5/Scripts/XAUScalper"
+  # remove files of the old strategies (v6 and earlier)
+  rm -f "$mql5/Include/XAUScalper/"{Strat,Strategy,Regime,Levels,Filters,Common}*.mqh \
+        "$mql5/Scripts/XAUScalper/StrategyTests."* 2>/dev/null || true
   cp "$INC_SRC"/*.mqh "$mql5/Include/XAUScalper/"
   cp "$EA_SRC" "$mql5/Experts/XAUScalper.mq5"
   cp "$TEST_DIR"/*.mq5 "$mql5/Scripts/XAUScalper/"
@@ -54,6 +57,5 @@ for mql5 in "${MQL5_DIRS[@]}"; do
 done
 
 echo
-echo "Next: in MetaEditor compile (F7) Experts/XAUScalper.mq5, Scripts/XAUScalper/RiskTests.mq5 and"
-echo "Scripts/XAUScalper/StrategyTests.mq5; run both test scripts on any chart (0 failed),"
-echo "then re-attach XAUScalper to the XAUUSD chart."
+echo "Next: in MetaEditor compile (F7) Experts/XAUScalper.mq5,"
+echo "then re-attach XAUScalper to ONE XAUUSD M1 chart."

@@ -1,8 +1,12 @@
-InpMode=10
-InpTestingMode=true
-InpG_Lot=0.01
-InpG_Waves=10,15,20
-InpG_TakeProfit=0.5
-InpG_NextWavePct=50
-InpG_MaxOpen=60
-InpG_BasketStopPct=0
+; XAUScalper v7.00 grid waves (user settings, same as the EA defaults)
+InpLot=0.01
+InpWaves=10,15,20
+InpTakeProfit=0.5
+InpNextWavePct=50
+InpMaxOpen=60
+InpMinMarginLevel=300
+InpMaxHoldMin=0
+InpBasketStopPct=0
+InpMaxSpread=0.4
+InpEmergencyMarginLevel=100
+InpAutoStart=true
