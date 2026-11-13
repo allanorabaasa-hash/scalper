@@ -1,0 +1,11 @@
+; XAUScalper v10.00 Controlled Directional Grid (strategy rules)
+InpEmaFast=21
+InpEmaSlow=55
+InpFlatGapAtr=0.10
+InpLot=0.01
+InpSpacing=4.50
+InpMaxLevels=5
+InpBasketTP=20.0
+InpBasketStop=30.0
+InpHardStop=18.0
+InpDailyLossPct=4.0
