@@ -70,6 +70,7 @@ def load_trades(path):
                     "hold_s": fnum(row.get("hold_s"), 0.0),
                     "r": r_mult,
                     "reason": row.get("reason", ""),
+                    "side": o.get("side", ""),
                 })
     trades.sort(key=lambda t: t["time"])
     return trades
@@ -166,6 +167,19 @@ def exit_table(trades, out=sys.stdout):
                 fmt(sum(t["profit"] for t in rt))))
 
 
+def group_table(trades, title, keyfunc, out=sys.stdout):
+    """Trades, win %, PF, net and expectancy (R) per group."""
+    groups = OrderedDict()
+    for t in sorted(trades, key=lambda t: str(keyfunc(t))):
+        groups.setdefault(keyfunc(t), []).append(t)
+    out.write("\n%-14s %6s %7s %7s %10s %8s\n" % (title, "trades", "win%", "PF", "net", "exp(R)"))
+    for k, ts in groups.items():
+        s = stats(ts)
+        out.write("%-14s %6d %7s %7s %10s %8s\n" % (
+            str(k)[:14], s["trades"], fmt(s["win_rate_pct"]), fmt(s["profit_factor"]),
+            fmt(s["net_profit"]), fmt(s["expectancy_R"])))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("csv")
@@ -192,6 +206,9 @@ def main(argv=None):
     print_block("ALL STRATEGIES", trades)
     summary_table(trades)
     exit_table(trades)
+    group_table(trades, "entry hour", lambda t: "%02d:00" % (t["open_time"] or t["time"]).hour)
+    group_table(trades, "strategy/side", lambda t: "%s %s" % (t["strategy"], t["side"] or "?"))
+    group_table(trades, "weekday", lambda t: (t["open_time"] or t["time"]).strftime("%u %a"))
     for name, ts in by_strategy(trades).items():
         print_block("STRATEGY " + name, ts)
 

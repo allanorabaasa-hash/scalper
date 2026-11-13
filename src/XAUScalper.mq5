@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "5.50"
+#property version   "5.60"
 #property description "Five strategies selected by a market regime detector."
 #property description "Every entry is approved and sized by an independent risk manager."
 
@@ -99,8 +99,8 @@ input double        InpS1_RewardR           = 1.8;           // Take profit (x r
 input double        InpS1_MaxSLATR          = 2.5;           // Max stop (x ATR M5), wider = skip
 input double        InpS1_BE_R              = 1.0;           // Breakeven at (x risk, 0 = off)
 input int           InpS1_MaxHoldMin        = 180;           // Max holding time (minutes)
-input int           InpS1_StaleMin          = 60;            // Time exit if not at 0.3R after N minutes (0 = off)
-input bool          InpS1_MomentumExit      = true;          // Exit when an M5 bar closes beyond EMA 50
+input int           InpS1_StaleMin          = 0;             // Time exit if not at 0.3R after N minutes (0 = off)
+input bool          InpS1_MomentumExit      = false;         // Exit when an M5 bar closes beyond EMA 50
 
 input group "Strategy 2: breakout + retest (M5)"
 input int           InpS2_MaxBars           = 12;            // Max bars between breakout and confirmation

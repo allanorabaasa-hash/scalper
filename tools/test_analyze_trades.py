@@ -90,6 +90,13 @@ class AnalyzeTests(unittest.TestCase):
         self.assertIn("OUT-OF-SAMPLE", text)
         self.assertIn("fold 2", text)
 
+    def test_group_tables(self):
+        buf = io.StringIO()
+        trades = at.load_trades(self.path)
+        at.group_table(trades, "entry hour", lambda t: "%02d:00" % t["open_time"].hour, out=buf)
+        self.assertIn("10:00", buf.getvalue())
+        self.assertEqual(trades[0]["side"], "BUY")
+
     def test_empty(self):
         self.assertEqual(at.stats([])["trades"], 0)
 
