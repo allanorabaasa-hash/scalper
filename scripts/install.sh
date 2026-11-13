@@ -48,7 +48,7 @@ for mql5 in "${MQL5_DIRS[@]}"; do
         "$mql5/Scripts/XAUScalper/StrategyTests."* 2>/dev/null || true
   cp "$INC_SRC"/*.mqh "$mql5/Include/XAUScalper/"
   cp "$EA_SRC" "$mql5/Experts/XAUScalper.mq5"
-  cp "$TEST_DIR"/*.mq5 "$mql5/Scripts/XAUScalper/"
+  cp "$TEST_DIR"/*.mq5 "$REPO_DIR"/src/Scripts/*.mq5 "$mql5/Scripts/XAUScalper/"
   mkdir -p "$mql5/Profiles/Tester"
   cp "$REPO_DIR"/tools/presets/*.set "$mql5/Profiles/Tester/" 2>/dev/null || true
   echo "    files copied"
@@ -57,5 +57,5 @@ for mql5 in "${MQL5_DIRS[@]}"; do
 done
 
 echo
-echo "Next: in MetaEditor compile (F7) Experts/XAUScalper.mq5,"
+echo "Next: in MetaEditor compile (F7) Experts/XAUScalper.mq5 and Scripts/XAUScalper/ExportBars.mq5,"
 echo "then re-attach XAUScalper to ONE XAUUSD M1 chart."

@@ -1,0 +1,11 @@
+; XAUScalper v8.00 EMA 21/55 trend strategy on M5
+InpTF=5
+InpEmaFast=21
+InpEmaSlow=55
+InpAtrPeriod=14
+InpSlAtr=1.5
+InpTrailStartAtr=1.0
+InpTrailAtr=2.0
+InpDailyFilter=true
+InpMinAtrRatio=0.5
+InpRiskPct=1.0
