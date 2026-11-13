@@ -118,3 +118,4 @@ trades; see `docs/PHASE_B.md`).
 | 2026-11-13 | - | v8.00 | - | - | - | - | - | - | Grid removed. EMA 21/55 trend strategy (user rules), M5 default; Python backtester tools/backtest_ema_trend.py. Not yet tested on real data. |
 | 2026-11-13 | - | v9.00 | - | - | - | - | - | - | Basket mode added (default), modelled on the user video. Not yet tested. |
 | 2026-11-13 | - | v10.00 | - | - | - | - | - | - | All previous strategies removed. Controlled Directional Grid (user rules + $30 basket stop). Not yet tested on real data. |
+| 2026-11-13 | - | v11.00 | - | - | - | - | - | - | Grid removed (no adding to losers). One 0.01 trade in the daily EMA direction, TP +$50 / SL -$20 on the server, daily limit off. |

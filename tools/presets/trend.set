@@ -1,0 +1,8 @@
+; XAUScalper v11.00 daily trend trader
+InpEmaFast=21
+InpEmaSlow=55
+InpFlatGapAtr=0.10
+InpLot=0.01
+InpTakeProfitUSD=50.0
+InpStopLossUSD=20.0
+InpDailyLossPct=0
