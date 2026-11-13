@@ -63,6 +63,15 @@ a maximum x ATR are skipped, never widened to fit.
 | 6 | Fair value gap retracement | M5, M15 trend | M15 close > EMA200 and EMA50 > EMA200; bullish FVG (C low > A high) of >= 0.3 ATR with a displacement candle body >= 1 ATR, formed within 20 bars; first retest: last bar dips into the gap, closes bullish above its middle; no close below the gap since | gap bottom / bar low - 0.3 ATR (0.6-2.5 ATR) | 2R |
 | 7 | Support/resistance bounce | M5, levels | 3 bars closed above the level, last bar touched it (0.15 ATR above to 0.3 ATR below) and closed back above with a rejection wick >= 50% or a bullish engulfing; no buys when M15 ADX > 30 with EMA50 < EMA200 | level / bar low - 0.2 ATR (0.5-2 ATR) | 2R |
 
+**Added in v6.00 (after the M5 strategies failed out-of-sample):**
+
+| # | Strategy | Timeframes | Entry (buy; sell mirrored) | Stop | Exit |
+|---|---|---|---|---|---|
+| 8 | Trend following (channel breakout) | H1 entry, D1 trend | last daily close above its EMA 50; H1 close above the highest high of the previous 20 H1 bars | 2 x ATR(H1) | no fixed target; trailing stop 3 x ATR(H1) from 1R; exit on an H1 close below the 10-bar low |
+
+Classic published parameters, not fitted to our test periods. Positions can stay open for days,
+including weekends (swap and weekend-gap risk).
+
 In Auto mode the regime map is unchanged (6 and 7 are not mapped to a regime yet); they run in
 All mode and in their own single-strategy modes.
 

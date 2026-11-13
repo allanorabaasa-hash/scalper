@@ -18,7 +18,7 @@ enum ENUM_REGIME
    REGIME_DANGER   = 6
   };
 
-#define STRAT_COUNT    7
+#define STRAT_COUNT    8
 #define STRAT_NONE     -1
 #define STRAT_PULLBACK 0
 #define STRAT_BREAKOUT 1
@@ -27,6 +27,7 @@ enum ENUM_REGIME
 #define STRAT_MOMENTUM 4
 #define STRAT_FVG      5
 #define STRAT_SRBOUNCE 6
+#define STRAT_TREND    7
 #define STRAT_ALL      100   // pseudo-id: every enabled strategy
 
 enum ENUM_STRATEGY_MODE
@@ -39,7 +40,8 @@ enum ENUM_STRATEGY_MODE
    MODE_MOMENTUM = 5,   // Only Strategy 5: momentum scalping
    MODE_ALL      = 6,   // All strategies scan, first valid signal trades (testing)
    MODE_FVG      = 7,   // Only Strategy 6: fair value gap retracement
-   MODE_SRBOUNCE = 8    // Only Strategy 7: support/resistance bounce
+   MODE_SRBOUNCE = 8,   // Only Strategy 7: support/resistance bounce
+   MODE_TREND    = 9    // Only Strategy 8: H1 trend following
   };
 
 // A trade proposal from a strategy. Numbers only, so it can be copied safely.
@@ -69,6 +71,7 @@ string StrategyCode(const int id)
       case STRAT_MOMENTUM: return "MOMENTUM";
       case STRAT_FVG:      return "FVG";
       case STRAT_SRBOUNCE: return "SRBOUNCE";
+      case STRAT_TREND:    return "TREND";
      }
    return "NONE";
   }
@@ -107,6 +110,7 @@ int StrategyForMode(const ENUM_STRATEGY_MODE m)
       case MODE_MOMENTUM: return STRAT_MOMENTUM;
       case MODE_FVG:      return STRAT_FVG;
       case MODE_SRBOUNCE: return STRAT_SRBOUNCE;
+      case MODE_TREND:    return STRAT_TREND;
      }
    return STRAT_NONE;
   }

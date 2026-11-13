@@ -26,8 +26,8 @@ portable Wine staging build.
 
 ## Current defaults: testing phase
 
-- **Enabled by default (from tests 1-2):** Pullback, Momentum, FVG. Breakout, Sweep, S/R bounce
-  and Mean reversion lost money or did not trade and are off. Results: `docs/VALIDATION.md`.
+- **Default (v6.00): Strategy 8, H1 trend following, alone.** All M5 strategies failed the
+  out-of-sample test (July-September) and are off. Results: `docs/VALIDATION.md`.
 - **Mode = All strategies:** every enabled strategy scans each new bar and the first valid signal
   trades. More trades and per-strategy results for finding the profitable ones. Switch *Mode* to
   **Auto** to let the regime detector choose.

@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "5.70"
+#property version   "6.00"
 #property description "Five strategies selected by a market regime detector."
 #property description "Every entry is approved and sized by an independent risk manager."
 
@@ -19,6 +19,7 @@
 #include <XAUScalper\StratMomentum.mqh>
 #include <XAUScalper\StratFVG.mqh>
 #include <XAUScalper\StratSRBounce.mqh>
+#include <XAUScalper\StratTrend.mqh>
 #include <XAUScalper\Regime.mqh>
 #include <XAUScalper\Filters.mqh>
 #include <XAUScalper\Execution.mqh>
@@ -36,14 +37,15 @@ input bool          InpAllowLive            = false;         // Allow trading on
 input bool          InpAutoStart            = true;          // Start/resume automatically whenever connected (STOP is remembered)
 
 input group "Strategy selection"
-input ENUM_STRATEGY_MODE InpMode            = MODE_ALL;      // Mode (All = testing; Auto = regime selects; or one strategy)
+input ENUM_STRATEGY_MODE InpMode            = MODE_TREND;    // Mode (Trend = Strategy 8 only; All = testing; Auto = regime selects)
 input bool          InpTestingMode          = true;          // TESTING: daily loss limit, loss streak, trade cap, cooldown and emergency drawdown OFF
-input bool          InpEnablePullback       = true;          // Enable Strategy 1: EMA trend pullback
+input bool          InpEnablePullback       = false;         // Enable Strategy 1: EMA trend pullback (off: failed Jul-Sep, PF 0.72-0.77)
 input bool          InpEnableBreakout       = false;         // Enable Strategy 2: breakout + retest (off: PF 0.85 / 0.76 in tests 1-2)
 input bool          InpEnableMeanRev        = false;         // Enable Strategy 3: mean reversion (off: 1 trade in 6 weeks)
 input bool          InpEnableSweep          = false;         // Enable Strategy 4: liquidity sweep (off: PF 0.95 / 0.97 in tests 1-2)
 input bool          InpEnableMomentum       = false;         // Enable Strategy 5: momentum scalping (off: PF 1.75 then 0.88, no stable edge)
 input bool          InpEnableFVG            = false;         // Enable Strategy 6: fair value gap retracement (off: PF 1.70 then 0.81, no stable edge)
+input bool          InpEnableTrend          = true;          // Enable Strategy 8: H1 trend following
 input bool          InpEnableSRBounce       = false;         // Enable Strategy 7: support/resistance bounce (off: PF 0.75 in test 2)
 
 input group "Market regime detector (M15)"
@@ -156,6 +158,16 @@ input double        InpS7_RewardR           = 2.0;           // Take profit (x r
 input double        InpS7_MaxSLATR          = 2.0;           // Max stop (x ATR), wider = skip
 input double        InpS7_BE_R              = 1.0;           // Breakeven at (x risk, 0 = off)
 input int           InpS7_MaxHoldMin        = 180;           // Max holding time (minutes)
+
+input group "Strategy 8: higher-timeframe trend following (classic channel breakout)"
+input ENUM_TIMEFRAMES InpS8_TF              = PERIOD_H1;     // Entry timeframe
+input int           InpS8_EntryBars         = 20;            // Entry: close beyond the N-bar high/low
+input int           InpS8_ExitBars          = 10;            // Exit: close beyond the opposite N-bar low/high
+input ENUM_TIMEFRAMES InpS8_TrendTF         = PERIOD_D1;     // Trend filter timeframe
+input int           InpS8_TrendEMA          = 50;            // Trend filter EMA period
+input double        InpS8_StopATR           = 2.0;           // Initial stop (x ATR of the entry timeframe)
+input double        InpS8_TrailStartR       = 1.0;           // Trailing starts at (x risk)
+input double        InpS8_TrailATR          = 3.0;           // Trailing distance (x ATR)
 
 input group "Connection safety"
 input bool          InpPauseOnReconnect     = true;          // Pause bot after a connection drop
@@ -363,6 +375,14 @@ bool InitStrategies(const SessionHours &sh)
    bool ok7 = s7.Init(_Symbol, p7, sh);
    g_s[STRAT_SRBOUNCE] = s7;
 
+   TrendParams p8;
+   p8.entryBars = InpS8_EntryBars;  p8.exitBars = InpS8_ExitBars;  p8.trendTF = InpS8_TrendTF;
+   p8.trendEMA = InpS8_TrendEMA;  p8.stopATR = InpS8_StopATR;
+   MakePlan(p8.plan, 0.0, InpS8_TrailStartR, InpS8_TrailATR, 0, 0, 0.0, true);
+   CStratTrend *s8 = new CStratTrend();
+   bool ok8 = s8.Init(_Symbol, InpS8_TF, p8);
+   g_s[STRAT_TREND] = s8;
+
    g_enabled[STRAT_PULLBACK] = InpEnablePullback;
    g_enabled[STRAT_BREAKOUT] = InpEnableBreakout;
    g_enabled[STRAT_MEANREV]  = InpEnableMeanRev;
@@ -370,8 +390,9 @@ bool InitStrategies(const SessionHours &sh)
    g_enabled[STRAT_MOMENTUM] = InpEnableMomentum;
    g_enabled[STRAT_FVG]      = InpEnableFVG;
    g_enabled[STRAT_SRBOUNCE] = InpEnableSRBounce;
+   g_enabled[STRAT_TREND]    = InpEnableTrend;
 
-   return ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7;
+   return ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8;
   }
 
 string StateKey()
