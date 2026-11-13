@@ -147,6 +147,19 @@ public:
       return (pos > 0) ? pos : m_trade.ResultOrder();
      }
 
+   // Sets stop loss and take profit to exact prices (no "only in favour" check). For placing a new
+   // position's SL/TP relative to its real fill price.
+   bool              SetSLTP(const ulong ticket, const double sl, const double tp, string &err)
+     {
+      err = "";
+      int dg = Digits_();
+      if(m_trade.PositionModify(ticket, NormalizeDouble(sl, dg), NormalizeDouble(tp, dg)))
+         return true;
+      err = StringFormat("SL/TP change on #%I64u failed (%u: %s)", ticket, m_trade.ResultRetcode(),
+                         m_trade.ResultRetcodeDescription());
+      return false;
+     }
+
    bool              Close(const ulong ticket, string &err)
      {
       err = "";

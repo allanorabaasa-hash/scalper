@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "12.10"
+#property version   "12.20"
 #property description "Controlled Grid: daily EMA 21/55 direction, 0.01 every $3 against, max 8 levels."
 #property description "Each position: TP +$4 / loss cut -$3 (on the server). Basket: TP +$12, stop -$18. Daily limit 4%."
 
@@ -511,6 +511,22 @@ bool OpenLevel(const int dir)
       Msg("Order failed: " + err, CLR_RED);
       return false;
      }
+   // SL / TP exactly InpPosLossCut / InpPosTP from the REAL fill price (the order was sent with
+   // distances from the requested price; slippage would make the loss bigger than the win)
+   if(PositionSelectByTicket(pos))
+     {
+      double f = PositionGetDouble(POSITION_PRICE_OPEN);
+      if(f > 0)
+         fill = f;
+      double wantSL = fill - dir * sl, wantTP = fill + dir * tp;
+      double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+      if(MathAbs(PositionGetDouble(POSITION_SL) - wantSL) > pt || MathAbs(PositionGetDouble(POSITION_TP) - wantTP) > pt)
+        {
+         string e2;
+         if(!g_exec.SetSLTP(pos, wantSL, wantTP, e2))
+            Msg(e2, CLR_RED);
+        }
+     }
    g_gridLevels = level;
    g_lastLevel  = fill;
    SaveGrid();
@@ -928,8 +944,7 @@ void UpdatePanel()
    double eq  = AccountInfoDouble(ACCOUNT_EQUITY);
    GridInfo g;
    ReadGrid(g);
-   if(g.levels == 0)
-      UpdateFilter();
+   UpdateFilter();
 
    string status = "STOPPED";
    color  pill   = CLR_GREY;
