@@ -1,6 +1,6 @@
 # Phase B: Risk management
 
-Status: **code complete, not yet verified**. It has not been compiled or run, because MetaEditor
+Status: **code complete, not yet verified** (the EA itself was extended in Phases C-G; the risk manager is unchanged). It has not been compiled or run, because MetaEditor
 runs only on the user's PC. Phase B is complete once the steps under "How to verify" pass.
 
 ## Modified files

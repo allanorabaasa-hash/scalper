@@ -11,7 +11,7 @@ export WINEDEBUG=-all
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EA_SRC="$REPO_DIR/src/XAUScalper.mq5"
 INC_SRC="$REPO_DIR/src/Include/XAUScalper"
-TEST_SRC="$REPO_DIR/tests/RiskTests.mq5"
+TEST_DIR="$REPO_DIR/tests"
 
 [ -x "$WINE" ]    || { echo "Wine not found at $WINE (set WINE=/path/to/wine)"; exit 1; }
 [ -f "$EA_SRC" ]  || { echo "Source not found: $EA_SRC"; exit 1; }
@@ -45,12 +45,15 @@ for mql5 in "${MQL5_DIRS[@]}"; do
   mkdir -p "$mql5/Include/XAUScalper" "$mql5/Scripts/XAUScalper"
   cp "$INC_SRC"/*.mqh "$mql5/Include/XAUScalper/"
   cp "$EA_SRC" "$mql5/Experts/XAUScalper.mq5"
-  [ -f "$TEST_SRC" ] && cp "$TEST_SRC" "$mql5/Scripts/XAUScalper/RiskTests.mq5"
+  cp "$TEST_DIR"/*.mq5 "$mql5/Scripts/XAUScalper/"
+  mkdir -p "$mql5/Profiles/Tester"
+  cp "$REPO_DIR"/tools/presets/*.set "$mql5/Profiles/Tester/" 2>/dev/null || true
   echo "    files copied"
   compile "$mql5/Experts/XAUScalper.mq5" "$mql5"
-  [ -f "$TEST_SRC" ] && compile "$mql5/Scripts/XAUScalper/RiskTests.mq5" "$mql5"
+  for t in "$mql5"/Scripts/XAUScalper/*.mq5; do compile "$t" "$mql5"; done
 done
 
 echo
-echo "Next: in MetaEditor compile (F7) Experts/XAUScalper.mq5 and Scripts/XAUScalper/RiskTests.mq5,"
-echo "run RiskTests on any chart, then re-attach XAUScalper to the XAUUSD chart."
+echo "Next: in MetaEditor compile (F7) Experts/XAUScalper.mq5, Scripts/XAUScalper/RiskTests.mq5 and"
+echo "Scripts/XAUScalper/StrategyTests.mq5; run both test scripts on any chart (0 failed),"
+echo "then re-attach XAUScalper to the XAUUSD chart."
