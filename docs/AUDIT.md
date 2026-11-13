@@ -102,4 +102,4 @@ the Strategy Tester.
 ## Backups
 
 Every change is a git commit, so any earlier version can be restored with `git checkout <commit>`.
-v3.0 is tagged `v3.0-before-audit`.
+The last version before the audit is commit `9068df8` (v3.0).
