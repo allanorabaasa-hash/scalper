@@ -1,0 +1,14 @@
+InpMode=6
+InpTestingMode=true
+InpEnablePullback=true
+InpEnableMomentum=false
+InpEnableFVG=false
+InpEnableBreakout=false
+InpEnableSweep=false
+InpEnableSRBounce=false
+InpEnableMeanRev=false
+InpS1_StaleMin=0
+InpS1_MomentumExit=false
+InpS1_UseHTF=true
+InpS1_HTF=16385
+InpS1_HTFEMA=200

@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "5.60"
+#property version   "5.70"
 #property description "Five strategies selected by a market regime detector."
 #property description "Every entry is approved and sized by an independent risk manager."
 
@@ -42,8 +42,8 @@ input bool          InpEnablePullback       = true;          // Enable Strategy 
 input bool          InpEnableBreakout       = false;         // Enable Strategy 2: breakout + retest (off: PF 0.85 / 0.76 in tests 1-2)
 input bool          InpEnableMeanRev        = false;         // Enable Strategy 3: mean reversion (off: 1 trade in 6 weeks)
 input bool          InpEnableSweep          = false;         // Enable Strategy 4: liquidity sweep (off: PF 0.95 / 0.97 in tests 1-2)
-input bool          InpEnableMomentum       = true;          // Enable Strategy 5: momentum scalping
-input bool          InpEnableFVG            = true;          // Enable Strategy 6: fair value gap retracement
+input bool          InpEnableMomentum       = false;         // Enable Strategy 5: momentum scalping (off: PF 1.75 then 0.88, no stable edge)
+input bool          InpEnableFVG            = false;         // Enable Strategy 6: fair value gap retracement (off: PF 1.70 then 0.81, no stable edge)
 input bool          InpEnableSRBounce       = false;         // Enable Strategy 7: support/resistance bounce (off: PF 0.75 in test 2)
 
 input group "Market regime detector (M15)"
@@ -101,6 +101,9 @@ input double        InpS1_BE_R              = 1.0;           // Breakeven at (x 
 input int           InpS1_MaxHoldMin        = 180;           // Max holding time (minutes)
 input int           InpS1_StaleMin          = 0;             // Time exit if not at 0.3R after N minutes (0 = off)
 input bool          InpS1_MomentumExit      = false;         // Exit when an M5 bar closes beyond EMA 50
+input bool          InpS1_UseHTF            = true;          // Only trade with the higher-timeframe trend
+input ENUM_TIMEFRAMES InpS1_HTF             = PERIOD_H1;     // Higher timeframe
+input int           InpS1_HTFEMA            = 200;           // Higher-timeframe EMA period
 
 input group "Strategy 2: breakout + retest (M5)"
 input int           InpS2_MaxBars           = 12;            // Max bars between breakout and confirmation
@@ -300,6 +303,7 @@ bool InitStrategies(const SessionHours &sh)
    p1.lookback = InpS1_Lookback;  p1.touchATR = 0.10;  p1.minGapATR = 0.20;  p1.minSlopeATR = 0.10;
    p1.rsiLevel = 50;  p1.slBufferATR = 0.30;  p1.minSLATR = 0.80;  p1.maxSLATR = InpS1_MaxSLATR;
    p1.rewardR = InpS1_RewardR;
+   p1.useHTF = InpS1_UseHTF;  p1.htfTF = InpS1_HTF;  p1.htfPeriod = InpS1_HTFEMA;
    MakePlan(p1.plan, InpS1_BE_R, 0.0, 0.0, InpS1_MaxHoldMin, InpS1_StaleMin, 0.3, InpS1_MomentumExit);
    CStratPullback *s1 = new CStratPullback();
    bool ok1 = s1.Init(_Symbol, p1);

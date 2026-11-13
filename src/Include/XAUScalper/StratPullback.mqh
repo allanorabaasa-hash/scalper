@@ -3,6 +3,9 @@
 //|  Strategy 1: EMA trend pullback                                   |
 //|                                                                   |
 //|  BUY (SELL mirrored):                                             |
+//|  - optional higher-timeframe filter: last closed HTF bar above    |
+//|    its EMA (default H1 EMA 200), so pullbacks are only traded in  |
+//|    the direction of the bigger trend                              |
 //|  - M15: price above EMA 200                                       |
 //|  - M5: EMA 20 above EMA 50, MAs not flat (gap and slope in ATR)   |
 //|  - M5: price pulled back to EMA 20 / EMA 50 in the last N bars    |
@@ -28,6 +31,9 @@ struct PullbackParams
    double            minSLATR;
    double            maxSLATR;
    double            rewardR;
+   bool              useHTF;         // higher-timeframe trend filter
+   ENUM_TIMEFRAMES   htfTF;
+   int               htfPeriod;
    ManagePlan        plan;
   };
 
@@ -35,15 +41,16 @@ class CStratPullback : public CStrategy
   {
 private:
    PullbackParams    p;
-   int               h200, h20, h50, hRsi;
+   int               h200, h20, h50, hRsi, hHTF;
 public:
-                     CStratPullback() { h200 = h20 = h50 = hRsi = INVALID_HANDLE; }
+                     CStratPullback() { h200 = h20 = h50 = hRsi = hHTF = INVALID_HANDLE; }
                     ~CStratPullback()
      {
       if(h200 != INVALID_HANDLE) IndicatorRelease(h200);
       if(h20 != INVALID_HANDLE)  IndicatorRelease(h20);
       if(h50 != INVALID_HANDLE)  IndicatorRelease(h50);
       if(hRsi != INVALID_HANDLE) IndicatorRelease(hRsi);
+      if(hHTF != INVALID_HANDLE) IndicatorRelease(hHTF);
      }
    bool              Init(const string sym, const PullbackParams &params)
      {
@@ -53,6 +60,12 @@ public:
       h50    = iMA(sym, PERIOD_M5, 50, 0, MODE_EMA, PRICE_CLOSE);
       hRsi   = iRSI(sym, PERIOD_M5, 14, PRICE_CLOSE);
       m_hATR = iATR(sym, PERIOD_M5, 14);
+      if(p.useHTF)
+        {
+         hHTF = iMA(sym, p.htfTF, p.htfPeriod, 0, MODE_EMA, PRICE_CLOSE);
+         if(hHTF == INVALID_HANDLE)
+            return false;
+        }
       return h200 != INVALID_HANDLE && h20 != INVALID_HANDLE && h50 != INVALID_HANDLE
              && hRsi != INVALID_HANDLE && m_hATR != INVALID_HANDLE;
      }
@@ -89,6 +102,19 @@ public:
          return false;
         }
       string side = (dir > 0) ? "up" : "down";
+      if(p.useHTF)
+        {
+         double eh[];
+         MqlRates hr[];
+         if(!GetBuf(hHTF, 0, 1, 1, eh) || !GetRates(m_sym, p.htfTF, 1, 1, hr))
+            return false;
+         bool agree = (dir > 0) ? hr[0].close > eh[0] : hr[0].close < eh[0];
+         if(!agree)
+           {
+            Status("trend " + side + " on M15 but against the higher-timeframe trend: skip");
+            return false;
+           }
+        }
       if(MathAbs(e20[0] - e50[0]) < p.minGapATR * a || MathAbs(e50[0] - e50[5]) < p.minSlopeATR * a)
         {
          Status("trend " + side + " but EMAs flat (choppy), waiting");
