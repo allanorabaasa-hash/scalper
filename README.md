@@ -75,6 +75,20 @@ Run both test scripts on any chart: they must report 0 failed.
 Attach **XAUScalper** to the gold chart (Common tab: *Allow Algo Trading*), turn on the
 **Algo Trading** toolbar button, press **START**.
 
+## Auto-start
+
+- **In the EA** (input *Auto-start*, on by default): the bot starts trading by itself whenever MT5
+  is connected to the broker, after MT5 opens, after the internet returns, and on the next trading
+  day after a risk lock. Pressing **STOP** or **EMERGENCY** is remembered, even across restarts:
+  auto-start stays off until you press **START** again. Risk locks always take priority.
+- **On Kali:** `./scripts/install-autostart.sh` registers `scripts/autostart.sh` to run at login.
+  It waits for the internet, starts MT5, and restarts MT5 within a minute if it closes.
+  Log: `~/scalper/autostart.log`. Remove with `./scripts/install-autostart.sh --remove`.
+  `./scripts/stop.sh` stops both the watchdog and MT5.
+
+MT5 reopens the chart with the EA attached as long as the chart and the **Algo Trading**
+button were left on when MT5 last closed.
+
 ## Panel
 
 START, STOP (no new trades; open trades stay managed), CLOSE ALL, EMERGENCY (stop, lock until

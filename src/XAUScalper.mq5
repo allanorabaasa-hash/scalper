@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "5.00"
+#property version   "5.10"
 #property description "Five strategies selected by a market regime detector."
 #property description "Every entry is approved and sized by an independent risk manager."
 
@@ -31,6 +31,7 @@ input string        InpTradeComment         = "XAUScalper";  // Order comment pr
 input int           InpSlippagePoints       = 30;            // Max slippage (points)
 input bool          InpJournal              = true;          // Trade journal (Common/Files/XAUScalper_trades.csv)
 input bool          InpAllowLive            = false;         // Allow trading on a REAL account (only after demo validation)
+input bool          InpAutoStart            = true;          // Start/resume automatically whenever connected (STOP is remembered)
 
 input group "Strategy selection"
 input ENUM_STRATEGY_MODE InpMode            = MODE_AUTO;     // Mode (Auto, or one strategy only for testing)
@@ -454,6 +455,7 @@ void OnTick()
 void OnTimer()
   {
    CheckConnection();
+   CheckAutoStart();
    g_filters.Update();
    g_regime.Update();
    ManagePositions();
@@ -730,6 +732,27 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
    UpdatePanel();
   }
 
+//--- Auto-start ----------------------------------------------------
+// With Auto-start on, the bot runs whenever MT5 is connected: after MT5 opens,
+// after the internet comes back, and on a new trading day after a risk lock.
+// Pressing STOP (or EMERGENCY) is remembered, even across restarts, and
+// auto-start stays off until START is pressed again.
+string ManualStopKey() { return StateKey() + "_manualstop"; }
+bool   ManualStop()    { return GlobalVariableCheck(ManualStopKey()); }
+
+void CheckAutoStart()
+  {
+   if(!InpAutoStart || MQLInfoInteger(MQL_TESTER) || g_state == BOT_RUNNING)
+      return;
+   if(ManualStop() || g_risk.Locked() || !TerminalInfoInteger(TERMINAL_CONNECTED))
+      return;
+   g_state = BOT_RUNNING;
+   for(int i = 0; i < STRAT_COUNT; i++)
+      if(CheckPointer(g_s[i]) != POINTER_INVALID)
+         g_s[i].ResetBar();
+   Msg("AUTO-STARTED: connected to the broker.", CLR_GREEN);
+  }
+
 void DoStart()
   {
    if(g_risk.Locked())
@@ -738,6 +761,7 @@ void DoStart()
       return;
      }
    g_state = BOT_RUNNING;
+   GlobalVariableDel(ManualStopKey());
    for(int i = 0; i < STRAT_COUNT; i++)
       if(CheckPointer(g_s[i]) != POINTER_INVALID)
          g_s[i].ResetBar();
@@ -750,6 +774,7 @@ void DoStart()
 void DoStop()
   {
    g_state = BOT_STOPPED;
+   GlobalVariableSet(ManualStopKey(), 1);   // auto-start stays off until START
    if(CountOurPositions() > 0)
       Msg("STOPPED. Open positions stay on their SL/TP and are still managed.", CLR_AMBER);
    else
@@ -780,6 +805,7 @@ void DoEmergency()
    if(answer != IDYES)
       return;
    g_risk.TriggerEmergency("manual");
+   GlobalVariableSet(ManualStopKey(), 1);   // manual emergency: no auto-start until START
    ApplyEmergency();
   }
 
@@ -841,13 +867,13 @@ void CheckConnection()
    else if(connected && !g_wasConnected)
      {
       g_wasConnected = true;
-      if(g_state == BOT_RUNNING && InpPauseOnReconnect)
+      if(g_state == BOT_RUNNING && InpPauseOnReconnect && !InpAutoStart)
         {
          g_state = BOT_PAUSED;
          Msg("Reconnected. Bot PAUSED, press START to resume.", CLR_AMBER);
         }
       else
-         Msg("Reconnected.", CLR_GREEN);
+         Msg(g_state == BOT_RUNNING ? "Reconnected. Trading resumes." : "Reconnected.", CLR_GREEN);
       if(InpCloseOnReconnect && CountOurPositions() > 0)
          CloseAll("reconnect");
      }
@@ -1453,6 +1479,10 @@ void UpdatePanel()
      }
    else if(g_state == BOT_PAUSED)
       cond = "Paused after reconnect. Press START to resume.";
+   else if(InpAutoStart && ManualStop())
+      cond = "Stopped by you: auto-start is off until you press START.";
+   else if(InpAutoStart)
+      cond = "Auto-start on: waiting for the broker connection.";
    else
       cond = "Stopped. No new trades will be opened.";
    SetText("f_cond", cond, condClr);
