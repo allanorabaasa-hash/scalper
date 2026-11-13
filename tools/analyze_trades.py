@@ -152,6 +152,20 @@ def summary_table(trades, out=sys.stdout):
             fmt(s["expectancy_R"]), fmt(s["max_drawdown"])))
 
 
+def exit_table(trades, out=sys.stdout):
+    """How trades ended, per strategy: count, average R and net per exit reason."""
+    out.write("\n%-10s %-26s %6s %8s %10s\n" % ("strategy", "exit reason", "count", "avg R", "net"))
+    for name, ts in by_strategy(trades).items():
+        reasons = OrderedDict()
+        for t in ts:
+            reasons.setdefault(t["reason"] or "-", []).append(t)
+        for reason, rt in sorted(reasons.items(), key=lambda kv: -len(kv[1])):
+            rs = [t["r"] for t in rt if t["r"] is not None]
+            out.write("%-10s %-26s %6d %8s %10s\n" % (
+                name, reason[:26], len(rt), fmt(sum(rs) / len(rs)) if rs else "-",
+                fmt(sum(t["profit"] for t in rt))))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("csv")
@@ -177,6 +191,7 @@ def main(argv=None):
 
     print_block("ALL STRATEGIES", trades)
     summary_table(trades)
+    exit_table(trades)
     for name, ts in by_strategy(trades).items():
         print_block("STRATEGY " + name, ts)
 

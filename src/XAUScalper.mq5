@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "5.20"
+#property version   "5.30"
 #property description "Five strategies selected by a market regime detector."
 #property description "Every entry is approved and sized by an independent risk manager."
 
@@ -37,9 +37,9 @@ input group "Strategy selection"
 input ENUM_STRATEGY_MODE InpMode            = MODE_ALL;      // Mode (All = testing; Auto = regime selects; or one strategy)
 input bool          InpTestingMode          = true;          // TESTING: daily loss limit, loss streak, trade cap, cooldown and emergency drawdown OFF
 input bool          InpEnablePullback       = true;          // Enable Strategy 1: EMA trend pullback
-input bool          InpEnableBreakout       = true;          // Enable Strategy 2: breakout + retest
+input bool          InpEnableBreakout       = false;         // Enable Strategy 2: breakout + retest (off: PF 0.85 in test 1)
 input bool          InpEnableMeanRev        = true;          // Enable Strategy 3: mean reversion
-input bool          InpEnableSweep          = true;          // Enable Strategy 4: liquidity sweep
+input bool          InpEnableSweep          = false;         // Enable Strategy 4: liquidity sweep (off: PF 0.95 in test 1)
 input bool          InpEnableMomentum       = true;          // Enable Strategy 5: momentum scalping
 
 input group "Market regime detector (M15)"

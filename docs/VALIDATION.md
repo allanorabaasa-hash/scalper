@@ -109,3 +109,4 @@ trades; see `docs/PHASE_B.md`).
 | Date | Phase | Strategy / mode | Period | Settings | Trades | PF | Expectancy (R) | Max DD | Pass? |
 |---|---|---|---|---|---|---|---|---|---|
 | | | | | | | | | | |
+| 2026-11-13 | H | All 5 strategies, testing mode (in-sample) | ~6 weeks to 2026-11-11, real ticks, deposit 3,000 | v5.20 defaults | 398 | 1.05 (net +120.21, max DD 12.0%) | payoff +0.30/trade | 12.0% | No (system). Per strategy: PULLBACK 203 tr PF 1.21 +219.49; MOMENTUM 19 tr PF 1.25 +15.71; BREAKOUT 80 tr PF 0.85 -78.38; SWEEP 95 tr PF 0.95 -31.08; MEANREV 1 tr -5.53. Breakout and Sweep disabled in v5.30. |
