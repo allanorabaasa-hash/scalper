@@ -25,6 +25,7 @@ enum ENUM_REGIME
 #define STRAT_MEANREV  2
 #define STRAT_SWEEP    3
 #define STRAT_MOMENTUM 4
+#define STRAT_ALL      100   // pseudo-id: every enabled strategy
 
 enum ENUM_STRATEGY_MODE
   {
@@ -33,7 +34,8 @@ enum ENUM_STRATEGY_MODE
    MODE_BREAKOUT = 2,   // Only Strategy 2: breakout + retest
    MODE_MEANREV  = 3,   // Only Strategy 3: RSI + Bollinger mean reversion
    MODE_SWEEP    = 4,   // Only Strategy 4: liquidity sweep + structure shift
-   MODE_MOMENTUM = 5    // Only Strategy 5: momentum scalping
+   MODE_MOMENTUM = 5,   // Only Strategy 5: momentum scalping
+   MODE_ALL      = 6    // All strategies scan, first valid signal trades (testing)
   };
 
 // A trade proposal from a strategy. Numbers only, so it can be copied safely.

@@ -24,6 +24,15 @@ portable Wine staging build.
 | I | Demo forward test | Procedure ready; to be run | same |
 | J | Controlled live deployment | Checklist ready | same |
 
+## Current defaults: testing phase
+
+- **Mode = All strategies:** every enabled strategy scans each new bar and the first valid signal
+  trades. More trades and per-strategy results for finding the profitable ones. Switch *Mode* to
+  **Auto** to let the regime detector choose.
+- **Testing mode = on:** daily loss limit, losses-in-a-row stop, daily trade cap, cooldown after
+  a loss and the emergency drawdown lock are OFF. Per-trade risk (0.5%), stops, margin checks and
+  the real-account guard stay on. **Turn testing mode off before any real-money trading.**
+
 ## Strategies (regime -> strategy)
 
 | Regime | Strategy |

@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "5.10"
+#property version   "5.20"
 #property description "Five strategies selected by a market regime detector."
 #property description "Every entry is approved and sized by an independent risk manager."
 
@@ -34,7 +34,8 @@ input bool          InpAllowLive            = false;         // Allow trading on
 input bool          InpAutoStart            = true;          // Start/resume automatically whenever connected (STOP is remembered)
 
 input group "Strategy selection"
-input ENUM_STRATEGY_MODE InpMode            = MODE_AUTO;     // Mode (Auto, or one strategy only for testing)
+input ENUM_STRATEGY_MODE InpMode            = MODE_ALL;      // Mode (All = testing; Auto = regime selects; or one strategy)
+input bool          InpTestingMode          = true;          // TESTING: daily loss limit, loss streak, trade cap, cooldown and emergency drawdown OFF
 input bool          InpEnablePullback       = true;          // Enable Strategy 1: EMA trend pullback
 input bool          InpEnableBreakout       = true;          // Enable Strategy 2: breakout + retest
 input bool          InpEnableMeanRev        = true;          // Enable Strategy 3: mean reversion
@@ -348,14 +349,14 @@ int OnInit()
    cfg.magic                = InpMagic;
    cfg.riskPct              = InpRiskPercent;
    cfg.minLotMaxRiskPct     = InpMinLotMaxRiskPct;
-   cfg.maxDailyLossPct      = InpMaxDailyLossPct;
+   cfg.maxDailyLossPct      = InpTestingMode ? 0.0 : InpMaxDailyLossPct;
    cfg.dailyTargetPct       = InpDailyTargetPct;
-   cfg.maxConsecLosses      = InpMaxConsecLosses;
+   cfg.maxConsecLosses      = InpTestingMode ? 0 : InpMaxConsecLosses;
    cfg.maxPositions         = InpMaxPositions;
-   cfg.maxDailyTrades       = InpMaxDailyTrades;
+   cfg.maxDailyTrades       = InpTestingMode ? 0 : InpMaxDailyTrades;
    cfg.minSecBetweenTrades  = InpMinSecBetweenTrades;
-   cfg.cooldownAfterLossMin = InpCooldownAfterLossMin;
-   cfg.emergencyDDPct       = InpEmergencyDDPct;
+   cfg.cooldownAfterLossMin = InpTestingMode ? 0 : InpCooldownAfterLossMin;
+   cfg.emergencyDDPct       = InpTestingMode ? 0.0 : InpEmergencyDDPct;
    cfg.emergencyMarginLevel = InpEmergencyMarginLevel;
    cfg.marginBufferPct      = InpMarginBufferPct;
    cfg.emergencyPolicy      = InpEmergencyPolicy;
@@ -479,6 +480,11 @@ int ActiveStrategy(string &why)
       return STRAT_NONE;
      }
    int id;
+   if(InpMode == MODE_ALL)
+     {
+      why = "";
+      return STRAT_ALL;
+     }
    if(InpMode != MODE_AUTO)
       id = (int)InpMode - 1;
    else
@@ -520,12 +526,26 @@ void Engine()
 
    TradeSignal s;
    ClearSignal(s);
-   if(!g_s[id].Evaluate(s))
+   if(id == STRAT_ALL)
+     {
+      // Every enabled strategy evaluates its own new bar; the first valid signal trades.
+      bool found = false;
+      for(int i = 0; i < STRAT_COUNT && !found; i++)
+        {
+         if(!g_enabled[i] || CheckPointer(g_s[i]) == POINTER_INVALID)
+            continue;
+         if(g_s[i].Evaluate(s))
+            found = true;
+        }
+      if(!found)
+         return;
+     }
+   else if(!g_s[id].Evaluate(s))
       return;
 
    if(HasOppositePosition(s.dir))
      {
-      Reject(StrategyCode(id) + " signal rejected: conflicting open position");
+      Reject(StrategyCode(s.strat) + " signal rejected: conflicting open position");
       return;
      }
    OpenSignal(s);
@@ -1350,7 +1370,8 @@ void UpdatePanel()
    string currency  = AccountInfoString(ACCOUNT_CURRENCY);
 
    // Header
-   string mode = (InpMode == MODE_AUTO) ? "AUTO (regime selects)" : "ONLY " + StrategyCode((int)InpMode - 1);
+   string mode = (InpMode == MODE_AUTO) ? "AUTO (regime selects)"
+                 : (InpMode == MODE_ALL) ? "ALL STRATEGIES (testing)" : "ONLY " + StrategyCode((int)InpMode - 1);
    SetText("mode", mode, CLR_BLUE);
    string status = "STOPPED";
    color  pill   = CLR_GREY;
@@ -1378,7 +1399,8 @@ void UpdatePanel()
 
    // Risk status
    double used = g_risk.DayLossUsedPct();
-   string r1 = (g_risk.MaxDailyLossPct() > 0)
+   string r1 = InpTestingMode ? StringFormat("Risk %.1f%%/trade   TESTING MODE: daily limits OFF", g_risk.RiskPct())
+               : (g_risk.MaxDailyLossPct() > 0)
                ? StringFormat("Risk %.1f%%/trade   Daily loss limit used: %.0f%%", g_risk.RiskPct(), used)
                : StringFormat("Risk %.1f%%/trade   Daily loss limit: OFF", g_risk.RiskPct());
    string r2 = StringFormat("Losses in a row %d/%d   Trades %d/%d   Wins %d/%d",
@@ -1393,7 +1415,7 @@ void UpdatePanel()
    string why;
    int act = ActiveStrategy(why);
    string reg = StringFormat("Regime: %s (score %.2f)  ->  %s", RegimeName(rg), g_regime.ScoreValue(),
-                             act == STRAT_NONE ? "WAIT" : StrategyCode(act));
+                             act == STRAT_NONE ? "WAIT" : (act == STRAT_ALL ? "ALL 5 SCANNING" : StrategyCode(act)));
    SetText("regime", reg, rg == REGIME_DANGER ? CLR_RED : (act == STRAT_NONE ? CLR_AMBER : CLR_TEXT));
    long age = haveTick ? (long)(TimeTradeServer() - tick.time) : -1;
    SetText("tick", age >= 0 ? StringFormat("last tick %I64ds ago", age) : "no tick", age > 60 ? CLR_AMBER : CLR_MUTED);
@@ -1475,7 +1497,12 @@ void UpdatePanel()
       else if(act == STRAT_NONE)
          cond = why;
       else
-         cond = StrategyCode(act) + ": " + g_s[act].GetStatus();
+        {
+         int show = act;
+         if(act == STRAT_ALL)
+            show = (int)((TimeLocal() / 3) % STRAT_COUNT);   // rotate through the strategies
+         cond = StrategyCode(show) + ": " + g_s[show].GetStatus();
+        }
      }
    else if(g_state == BOT_PAUSED)
       cond = "Paused after reconnect. Press START to resume.";
