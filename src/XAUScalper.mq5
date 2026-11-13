@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "5.40"
+#property version   "5.50"
 #property description "Five strategies selected by a market regime detector."
 #property description "Every entry is approved and sized by an independent risk manager."
 
@@ -39,12 +39,12 @@ input group "Strategy selection"
 input ENUM_STRATEGY_MODE InpMode            = MODE_ALL;      // Mode (All = testing; Auto = regime selects; or one strategy)
 input bool          InpTestingMode          = true;          // TESTING: daily loss limit, loss streak, trade cap, cooldown and emergency drawdown OFF
 input bool          InpEnablePullback       = true;          // Enable Strategy 1: EMA trend pullback
-input bool          InpEnableBreakout       = false;         // Enable Strategy 2: breakout + retest (off: PF 0.85 in test 1)
-input bool          InpEnableMeanRev        = true;          // Enable Strategy 3: mean reversion
-input bool          InpEnableSweep          = false;         // Enable Strategy 4: liquidity sweep (off: PF 0.95 in test 1)
+input bool          InpEnableBreakout       = false;         // Enable Strategy 2: breakout + retest (off: PF 0.85 / 0.76 in tests 1-2)
+input bool          InpEnableMeanRev        = false;         // Enable Strategy 3: mean reversion (off: 1 trade in 6 weeks)
+input bool          InpEnableSweep          = false;         // Enable Strategy 4: liquidity sweep (off: PF 0.95 / 0.97 in tests 1-2)
 input bool          InpEnableMomentum       = true;          // Enable Strategy 5: momentum scalping
 input bool          InpEnableFVG            = true;          // Enable Strategy 6: fair value gap retracement
-input bool          InpEnableSRBounce       = true;          // Enable Strategy 7: support/resistance bounce
+input bool          InpEnableSRBounce       = false;         // Enable Strategy 7: support/resistance bounce (off: PF 0.75 in test 2)
 
 input group "Market regime detector (M15)"
 input double        InpRegMinScore          = 0.75;          // Rule-agreement score needed (0-1; not a probability)
@@ -99,6 +99,8 @@ input double        InpS1_RewardR           = 1.8;           // Take profit (x r
 input double        InpS1_MaxSLATR          = 2.5;           // Max stop (x ATR M5), wider = skip
 input double        InpS1_BE_R              = 1.0;           // Breakeven at (x risk, 0 = off)
 input int           InpS1_MaxHoldMin        = 180;           // Max holding time (minutes)
+input int           InpS1_StaleMin          = 60;            // Time exit if not at 0.3R after N minutes (0 = off)
+input bool          InpS1_MomentumExit      = true;          // Exit when an M5 bar closes beyond EMA 50
 
 input group "Strategy 2: breakout + retest (M5)"
 input int           InpS2_MaxBars           = 12;            // Max bars between breakout and confirmation
@@ -282,8 +284,9 @@ string TakeCloseReason(const long position)
 //  INITIALISATION
 //==================================================================
 void MakePlan(ManagePlan &m, const double beR, const double trailStartR, const double trailATR,
-              const int maxHoldMin, const int staleMin, const double staleR)
+              const int maxHoldMin, const int staleMin, const double staleR, const bool momentumExit = true)
   {
+   m.momentumExit = momentumExit;
    m.beR = beR;  m.trailStartR = trailStartR;  m.trailATR = trailATR;
    m.maxHoldMin = maxHoldMin;  m.staleMin = staleMin;  m.staleR = staleR;
   }
@@ -297,7 +300,7 @@ bool InitStrategies(const SessionHours &sh)
    p1.lookback = InpS1_Lookback;  p1.touchATR = 0.10;  p1.minGapATR = 0.20;  p1.minSlopeATR = 0.10;
    p1.rsiLevel = 50;  p1.slBufferATR = 0.30;  p1.minSLATR = 0.80;  p1.maxSLATR = InpS1_MaxSLATR;
    p1.rewardR = InpS1_RewardR;
-   MakePlan(p1.plan, InpS1_BE_R, 0.0, 0.0, InpS1_MaxHoldMin, 60, 0.3);
+   MakePlan(p1.plan, InpS1_BE_R, 0.0, 0.0, InpS1_MaxHoldMin, InpS1_StaleMin, 0.3, InpS1_MomentumExit);
    CStratPullback *s1 = new CStratPullback();
    bool ok1 = s1.Init(_Symbol, p1);
    g_s[STRAT_PULLBACK] = s1;
@@ -712,7 +715,7 @@ void ManagePositions()
          why = "max holding time";
       else if(plan.staleMin > 0 && ageMin >= plan.staleMin && R > 0 && profit < plan.staleR * R)
          why = "time exit: no progress";
-      else if(newM1 && g_s[id].ExitSignal(dir))
+      else if(newM1 && plan.momentumExit && g_s[id].ExitSignal(dir))
          why = "momentum lost";
       if(why != "")
         {

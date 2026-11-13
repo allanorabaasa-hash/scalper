@@ -24,6 +24,7 @@ struct ManagePlan
    int               maxHoldMin;   // close after this many minutes (0 = off)
    int               staleMin;     // close if not at staleR x risk after this many minutes (0 = off)
    double            staleR;
+   bool              momentumExit; // close when the strategy reports lost momentum
   };
 
 class CStrategy

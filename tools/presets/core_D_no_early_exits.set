@@ -1,0 +1,11 @@
+InpMode=6
+InpTestingMode=true
+InpEnablePullback=true
+InpEnableMomentum=true
+InpEnableFVG=true
+InpEnableBreakout=false
+InpEnableSweep=false
+InpEnableSRBounce=false
+InpEnableMeanRev=false
+InpS1_StaleMin=0
+InpS1_MomentumExit=false
