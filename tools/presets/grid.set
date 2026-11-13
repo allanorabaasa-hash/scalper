@@ -1,0 +1,12 @@
+; XAUScalper v12.00 Controlled Grid (strategy rules)
+InpEmaFast=21
+InpEmaSlow=55
+InpFlatGapAtr=0.10
+InpLot=0.01
+InpSpacing=3.00
+InpMaxLevels=8
+InpPosTP=4.0
+InpPosLossCut=5.0
+InpBasketTP=12.0
+InpBasketStop=18.0
+InpDailyLossPct=4.0
