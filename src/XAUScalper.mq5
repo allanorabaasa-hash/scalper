@@ -4,9 +4,9 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "11.00"
-#property description "Daily trend trader: one 0.01 position in the daily EMA 21/55 direction, never adds to a loser."
-#property description "Take profit +$50, stop loss -$20, both on the broker's server. A new trade opens after each close."
+#property version   "12.00"
+#property description "Controlled Grid: daily EMA 21/55 direction, 0.01 every $3 against, max 8 levels."
+#property description "Each position: TP +$4 / loss cut -$5 (on the server). Basket: TP +$12, stop -$18. Daily limit 4%."
 
 #include <XAUScalper\RiskManager.mqh>
 #include <XAUScalper\Execution.mqh>
@@ -20,13 +20,19 @@ input int             InpEmaFast            = 21;            // Daily EMA fast
 input int             InpEmaSlow            = 55;            // Daily EMA slow
 input double          InpFlatGapAtr         = 0.10;          // "Flat": EMA gap below this x ATR(D1,14) -> no new grid
 
-input group "Trade"
-input double          InpLot                = 0.01;          // Lot (fixed)
-input double          InpTakeProfitUSD      = 50.0;          // Take profit: close the winner at +this many USD
-input double          InpStopLossUSD        = 20.0;          // Stop loss: close the loser at -this many USD
+input group "Grid"
+input double          InpLot                = 0.01;          // Lot on every level (fixed, never increased)
+input double          InpSpacing            = 3.00;          // Grid spacing (price, USD)
+input int             InpMaxLevels          = 8;             // Maximum levels per grid
+
+input group "Exits"
+input double          InpPosTP              = 4.0;           // Individual take profit: close a position at +USD
+input double          InpPosLossCut         = 5.0;           // Early loss cut: close a position at -USD
+input double          InpBasketTP           = 12.0;          // Basket take profit: close all at +USD floating
+input double          InpBasketStop         = 18.0;          // Hard basket stop: close all at -USD floating
 
 input group "Risk controls"
-input double          InpDailyLossPct       = 0;             // No new trades for the rest of the day after this % loss (0 = off, testing)
+input double          InpDailyLossPct       = 4.0;           // No new grid for the rest of the day after this % loss (0 = off)
 input double          InpEmergencyMarginLevel = 100;         // Emergency: close all below this margin level % (0 = off)
 input bool            InpAllowReal          = false;         // Allow trading on a REAL account
 input bool            InpAutoStart          = true;          // Start/resume automatically whenever connected (STOP is remembered)
@@ -66,7 +72,10 @@ int            g_filter       = 0;    // +1 buy grids, -1 sell grids, 0 none
 string         g_filterText   = "-";
 string         g_block        = "";   // why no new grid / level right now
 datetime       g_lastTry      = 0;
-int            g_trades = 0, g_wins = 0, g_losses = 0;
+int            g_trades = 0, g_wins = 0, g_losses = 0, g_grids = 0;
+int            g_gridDir   = 0;       // active grid: direction, levels opened, price of the last level
+int            g_gridLevels = 0;      // (persisted in global variables: survives restarts)
+double         g_lastLevel = 0;
 
 long           g_reasonPos[];         // positions closed by the bot, and why (journal)
 string         g_reasonText[];
@@ -241,9 +250,10 @@ int OnInit()
    ChartSetInteger(0, CHART_FOREGROUND, false);
    ChartSetInteger(0, CHART_SHOW_ONE_CLICK, false);
 
-   if(InpLot <= 0 || InpTakeProfitUSD <= 0 || InpStopLossUSD <= 0 || InpEmaSlow <= InpEmaFast)
+   if(InpLot <= 0 || InpSpacing <= 0 || InpMaxLevels < 1 || InpPosTP <= 0 || InpPosLossCut <= 0
+      || InpEmaSlow <= InpEmaFast)
      {
-      Print("XAUScalper: check the inputs (lot, take profit and stop loss above 0; slow EMA above fast)");
+      Print("XAUScalper: check the inputs (lot, spacing, levels, TP and loss cut above 0; slow EMA above fast)");
       return INIT_PARAMETERS_INCORRECT;
      }
    g_hDFast = iMA(_Symbol, PERIOD_D1, InpEmaFast, 0, MODE_EMA, PRICE_CLOSE);
@@ -260,7 +270,7 @@ int OnInit()
    // Risk manager: day statistics and the margin-level emergency only (the grid has its own limits).
    RiskConfig cfg;
    cfg.magic = InpMagic;  cfg.riskPct = 1.0;  cfg.minLotMaxRiskPct = 0;  cfg.maxDailyLossPct = 0;
-   cfg.dailyTargetPct = 0;  cfg.maxConsecLosses = 0;  cfg.maxPositions = 1;  cfg.maxDailyTrades = 0;
+   cfg.dailyTargetPct = 0;  cfg.maxConsecLosses = 0;  cfg.maxPositions = InpMaxLevels;  cfg.maxDailyTrades = 0;
    cfg.minSecBetweenTrades = 0;  cfg.cooldownAfterLossMin = 0;  cfg.emergencyDDPct = 0;
    cfg.emergencyMarginLevel = InpEmergencyMarginLevel;  cfg.marginBufferPct = 0;
    cfg.emergencyPolicy = EMERGENCY_CLOSE_ALL;
@@ -277,6 +287,7 @@ int OnInit()
       g_state = BOT_RUNNING;
    g_wasConnected = (bool)TerminalInfoInteger(TERMINAL_CONNECTED);
    DayStartBalance();
+   LoadGrid();
 
    if(StringFind(_Symbol, "XAU") < 0 && StringFind(_Symbol, "GOLD") < 0)
       Msg("Warning: the $ settings are made for gold (XAUUSD).", CLR_AMBER);
@@ -329,8 +340,32 @@ void OnTimer()
   }
 
 //==================================================================
-//  TRADE ENGINE
+//  GRID ENGINE
 //==================================================================
+string GridKey() { return StateKey() + "_grid_" + _Symbol; }
+
+void SaveGrid()
+  {
+   GlobalVariableSet(GridKey() + "_dir", g_gridDir);
+   GlobalVariableSet(GridKey() + "_lev", g_gridLevels);
+   GlobalVariableSet(GridKey() + "_last", g_lastLevel);
+  }
+
+void LoadGrid()
+  {
+   if(MQLInfoInteger(MQL_TESTER) || !GlobalVariableCheck(GridKey() + "_dir"))
+      return;
+   g_gridDir    = (int)GlobalVariableGet(GridKey() + "_dir");
+   g_gridLevels = (int)GlobalVariableGet(GridKey() + "_lev");
+   g_lastLevel  = GlobalVariableGet(GridKey() + "_last");
+  }
+
+void EndGrid()
+  {
+   g_gridDir = 0;  g_gridLevels = 0;  g_lastLevel = 0;
+   SaveGrid();
+  }
+
 // Price distance that gains or loses `usd` on InpLot (0.01 lot of gold: $1 per $1 move).
 double UsdToDistance(const double usd)
   {
@@ -341,25 +376,64 @@ double UsdToDistance(const double usd)
    return usd / (InpLot * tv / ts);
   }
 
-// One position at a time. Its stop loss and take profit sit on the broker's server, so they
-// work even when MT5 or the internet is down. Nothing is ever added to a losing position.
-// After every close a new trade opens in the daily direction, until STOP.
+// Every tick:
+//   1. individual exits: +$4 take profit / -$5 loss cut (also set on the broker's server per order)
+//   2. basket exits: total floating +$12 -> close all; -$18 -> close all
+//   3. a grid with no open positions has ended; when RUNNING a new one starts in the daily direction
+//   4. when RUNNING: one more level every $3 against the last level, up to 8 levels
 void Grid()
   {
+   // 1. individual exits (backup for the server-side TP/SL)
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(t == 0 || !IsOurs())
+         continue;
+      double net = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+      string why = (net >= InpPosTP) ? "take profit" : ((net <= -InpPosLossCut) ? "loss cut" : "");
+      if(why == "")
+         continue;
+      string err;
+      NoteCloseReason(t, why);
+      if(!g_exec.Close(t, err))
+         Print(err);
+     }
+
+   // 2. basket exits
    GridInfo g;
    ReadGrid(g);
+   if(g.levels > 0)
+     {
+      string why = "";
+      if(InpBasketTP > 0 && g.pl >= InpBasketTP)
+         why = "basket take profit";
+      else if(InpBasketStop > 0 && g.pl <= -InpBasketStop)
+         why = "hard basket stop";
+      if(why != "")
+        {
+         CloseAll(why);
+         EndGrid();
+         Msg(StringFormat("Grid closed (%s): %+.2f", why, g.pl), why == "basket take profit" ? CLR_GREEN : CLR_RED);
+         return;
+        }
+     }
+
+   // 3. a grid without open positions is over
+   if(g.levels == 0 && g_gridDir != 0)
+      EndGrid();
+   if(g.levels > 0 && g_gridDir == 0)          // positions without saved state (e.g. a new install)
+     {
+      g_gridDir = g.dir;  g_gridLevels = g.levels;  g_lastLevel = g.lastLevel;
+      SaveGrid();
+     }
+
    if(g_state != BOT_RUNNING)
      {
       g_block = "";
       return;
      }
-   if(g.levels > 0)
-     {
-      g_block = "";
-      return;                           // in a trade: the server closes it at TP or SL
-     }
    datetime now = TimeCurrent();
-   if(now == g_lastTry)                 // at most one order attempt per second
+   if(now == g_lastTry)                        // at most one order attempt per second
       return;
    g_lastTry = now;
 
@@ -371,10 +445,31 @@ void Grid()
       g_block = g_risk.LockText();
       return;
      }
+
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick))
+      return;
+
+   // 4. next level
+   if(g_gridDir != 0)
+     {
+      if(g_gridLevels >= InpMaxLevels)
+        {
+         g_block = StringFormat("all %d levels used: no more adding", InpMaxLevels);
+         return;
+        }
+      double price = (g_gridDir > 0) ? tick.ask : tick.bid;
+      if(g_gridDir * (g_lastLevel - price) >= InpSpacing)
+         OpenLevel(g_gridDir);
+      g_block = "";
+      return;
+     }
+
+   // 3b. new grid
    UpdateFilter();
    if(DailyLimitHit())
      {
-      g_block = StringFormat("daily loss limit %.1f%% reached: no new trade today", InpDailyLossPct);
+      g_block = StringFormat("daily loss limit %.1f%% reached: no new grid today", InpDailyLossPct);
       return;
      }
    if(g_filter == 0)
@@ -382,41 +477,48 @@ void Grid()
       g_block = g_filterText;
       return;
      }
-   OpenTrade(g_filter);
+   g_gridDir = g_filter;
+   g_gridLevels = 0;
+   if(OpenLevel(g_filter))
+      g_grids++;
+   else
+      EndGrid();
   }
 
-bool OpenTrade(const int dir)
+bool OpenLevel(const int dir)
   {
-   double sl = UsdToDistance(InpStopLossUSD);
-   double tp = UsdToDistance(InpTakeProfitUSD);
+   double sl = UsdToDistance(InpPosLossCut);
+   double tp = UsdToDistance(InpPosTP);
    if(sl <= 0 || tp <= 0)
      {
       g_block = "no tick value for " + _Symbol;
       return false;
      }
-   double minDist = g_exec.MinStopDistance();
-   if(sl < minDist || tp < minDist)
+   if(MathMin(sl, tp) < g_exec.MinStopDistance())
      {
-      g_block = StringFormat("SL/TP closer than the broker allows (%.2f)", minDist);
+      g_block = StringFormat("TP/loss cut closer than the broker allows (%.2f)", g_exec.MinStopDistance());
       return false;
      }
+   int    level = g_gridLevels + 1;
    string err;
    double fill = 0;
    MqlTick tk;
    SymbolInfoTick(_Symbol, tk);
-   ulong pos = g_exec.Open(dir, InpLot, sl, tp, InpTradeComment, err, fill);
+   ulong pos = g_exec.Open(dir, InpLot, sl, tp, InpTradeComment + ":L" + IntegerToString(level), err, fill);
    if(pos == 0)
      {
       g_block = "order rejected: " + err;
       Msg("Order failed: " + err, CLR_RED);
       return false;
      }
+   g_gridLevels = level;
+   g_lastLevel  = fill;
+   SaveGrid();
    g_trades++;
-   JournalOpen((long)pos, dir, "TREND", g_filterText, InpLot, fill, tk.ask - tk.bid, sl, tp, 0, InpStopLossUSD,
-               0, 0, "");
-   Msg(StringFormat("%s %.2f at %s   SL %s (-%.0f)   TP %s (+%.0f)", dir > 0 ? "BUY" : "SELL", InpLot,
-                    DoubleToString(fill, _Digits), DoubleToString(fill - dir * sl, _Digits), InpStopLossUSD,
-                    DoubleToString(fill + dir * tp, _Digits), InpTakeProfitUSD), CLR_BLUE);
+   JournalOpen((long)pos, dir, "GRID", "level " + IntegerToString(level), InpLot, fill, tk.ask - tk.bid, sl, tp, 0,
+               InpPosLossCut, 0, 0, "");
+   Msg(StringFormat("%s level %d/%d at %s", dir > 0 ? "BUY" : "SELL", level, InpMaxLevels,
+                    DoubleToString(fill, _Digits)), CLR_BLUE);
    return true;
   }
 
@@ -456,7 +558,7 @@ void CheckConnection()
    if(!connected && g_wasConnected)
      {
       g_wasConnected = false;
-      Msg("Connection lost. SL and TP stay on the broker's server.", CLR_RED);
+      Msg("Connection lost. Each position's TP / loss cut stays on the server.", CLR_RED);
      }
    else if(connected && !g_wasConnected)
      {
@@ -518,7 +620,7 @@ void DoStop()
   {
    g_state = BOT_STOPPED;
    GlobalVariableSet(ManualStopKey(), 1);
-   Msg("STOPPED: no new trades. The open trade keeps its SL and TP.", CLR_AMBER);
+   Msg("STOPPED: no new grids or levels. Open positions keep their TP / loss cut.", CLR_AMBER);
   }
 
 void DoCloseAll()
@@ -622,7 +724,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
       return;
    string why = TakeCloseReason(posId);
    if(why == "")
-      why = (reason == DEAL_REASON_TP) ? "take profit" : (reason == DEAL_REASON_SL) ? "stop loss"
+      why = (reason == DEAL_REASON_TP) ? "take profit" : (reason == DEAL_REASON_SL) ? "loss cut"
             : (reason == DEAL_REASON_SO) ? "stop out" : "other";
    if(profit > 0)
       g_wins++;
@@ -768,13 +870,13 @@ void BuildPanel()
    MkRect("bg",     0, 0, PANEL_W, PANEL_H, CLR_BG, CLR_BORDER);
    MkRect("header", 0, 0, PANEL_W, 36, CLR_HEADER, CLR_BORDER);
    MkLabel("title", 14, 9, "XAU SCALPER", CLR_TEXT, 12, "Arial Bold");
-   MkLabel("mode", 150, 12, "DAILY TREND  TP +" + DoubleToString(InpTakeProfitUSD, 0) + " / SL -" + DoubleToString(InpStopLossUSD, 0), CLR_BLUE, 8, "Arial Bold");
+   MkLabel("mode", 150, 12, "CONTROLLED GRID", CLR_BLUE, 8, "Arial Bold");
    MkRect("pill", PANEL_W - 118, 8, 106, 20, CLR_GREY, CLR_GREY);
    MkLabel("pill_t", PANEL_W - 65, 18, "STOPPED", clrWhite, 8, "Arial Bold", ANCHOR_CENTER);
    MkButton("b_min", PANEL_W - 146, 8, 22, 20, "-", CLR_GREY, clrWhite, 10);
    MkLabel("info", 14, 44, " ", CLR_MUTED, 8);
 
-   string titles[6] = {"BALANCE", "EQUITY", "DAY P/L", "OPEN P/L", "SPREAD", "MARGIN LEVEL"};
+   string titles[6] = {"BALANCE", "EQUITY", "DAY P/L", "GRID FLOATING P/L", "SPREAD", "MARGIN LEVEL"};
    for(int i = 0; i < 6; i++)
      {
       int x = 14 + (i % 3) * 178;
@@ -791,7 +893,7 @@ void BuildPanel()
    MkButton("b_close", 248, 188, 120, 32, "CLOSE ALL", CLR_GREY,    clrWhite, 9);
    MkButton("b_emerg", 376, 188, 152, 32, "EMERGENCY", CLR_DARKRED, clrWhite, 9);
 
-   MkLabel("t_title", 14, 226, "OPEN POSITION (0)", CLR_MUTED, 7, "Arial Bold");
+   MkLabel("t_title", 14, 226, "GRID POSITIONS (0)", CLR_MUTED, 7, "Arial Bold");
    string heads[6] = {"TICKET", "TYPE", "OPEN", "STOP LOSS", "TAKE PROFIT", "P/L"};
    for(int c = 0; c < 6; c++)
       MkLabel("h" + IntegerToString(c), ColX(c), ROW_Y0 + 6, heads[c], CLR_MUTED, 7, "Arial",
@@ -805,7 +907,7 @@ void BuildPanel()
       MkButton("rx" + IntegerToString(r), 500, y - 2, 26, 18, "X", CLR_RED, clrWhite, 8);
       ShowObj("rx" + IntegerToString(r), false);
      }
-   MkLabel("t_empty", PANEL_W / 2, ROW_Y0 + 60, "No open position", CLR_MUTED, 9, "Arial", ANCHOR_UPPER);
+   MkLabel("t_empty", PANEL_W / 2, ROW_Y0 + 60, "No grid open", CLR_MUTED, 9, "Arial", ANCHOR_UPPER);
 
    MkRect("sep3", 12, PANEL_H - 52, PANEL_W - 24, 1, CLR_BORDER, CLR_BORDER);
    MkLabel("f_msg",  14, PANEL_H - 44, g_lastMsg, g_lastMsgColor, 8);
@@ -853,8 +955,15 @@ void UpdatePanel()
    SetText("s_v5", ml > 0 ? DoubleToString(ml, 0) + "%" : "-", CLR_TEXT);
 
    SetText("sig1", "Daily trend: " + g_filterText, g_filter > 0 ? CLR_GREEN : (g_filter < 0 ? CLR_RED : CLR_AMBER));
-   SetText("sig2", StringFormat("Trades %d   won %d   lost %d   lot %.2f   daily limit %s", g_trades, g_wins, g_losses,
-                                InpLot, InpDailyLossPct > 0 ? DoubleToString(InpDailyLossPct, 1) + "%" : "off"), CLR_MUTED);
+   if(g_gridDir != 0)
+      SetText("sig2", StringFormat("%s grid: level %d/%d   next %s   basket +%.0f / -%.0f", g_gridDir > 0 ? "BUY" : "SELL",
+                                   g_gridLevels, InpMaxLevels, g_gridLevels < InpMaxLevels
+                                   ? DoubleToString(g_lastLevel - g_gridDir * InpSpacing, 2) : "none",
+                                   InpBasketTP, InpBasketStop), CLR_MUTED);
+   else
+      SetText("sig2", StringFormat("Grids %d   positions %d   won %d   lost %d   daily limit %s", g_grids, g_trades,
+                                   g_wins, g_losses, InpDailyLossPct > 0 ? DoubleToString(InpDailyLossPct, 1) + "%" : "off"),
+              CLR_MUTED);
 
    int row = 0, total = 0;
    for(int i = 0; i < PositionsTotal(); i++)
@@ -886,7 +995,7 @@ void UpdatePanel()
       g_rowTicket[row] = 0;
       ShowObj("rx" + IntegerToString(row), false);
      }
-   SetText("t_title", "OPEN POSITION (" + IntegerToString(total) + ")", CLR_MUTED);
+   SetText("t_title", "GRID POSITIONS (" + IntegerToString(total) + ")", CLR_MUTED);
    ShowObj("t_empty", total == 0);
 
    SetText("f_msg", g_lastMsg, g_lastMsgColor);
@@ -903,7 +1012,7 @@ void UpdatePanel()
       cc = CLR_AMBER;
      }
    else if(g_state == BOT_RUNNING)
-      cond = total > 0 ? "In a trade: the broker closes it at TP or SL." : "Running: opening a trade.";
+      cond = total > 0 ? "Grid active." : "Running: opening a grid.";
    else if(InpAutoStart && ManualStop())
       cond = "Stopped by you: press START to resume.";
    else
