@@ -7,6 +7,6 @@ InpMaxOpen=60
 InpMinMarginLevel=300
 InpMaxHoldMin=0
 InpBasketStopPct=0
-InpMaxSpread=0.4
+InpMaxSpreadCostPct=60
 InpEmergencyMarginLevel=100
 InpAutoStart=true

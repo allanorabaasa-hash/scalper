@@ -1,6 +1,6 @@
 # scalper
 
-XAUUSD Expert Advisor for MetaTrader 5 with one strategy: **grid waves**. Runs on Kali Linux
+Grid Expert Advisor (built for XAUUSD, works on any symbol) for MetaTrader 5 with one strategy: **grid waves**. Runs on Kali Linux
 through a portable Wine staging build, with an on-chart control panel.
 
 > **Demo and Strategy Tester only.** Positions have no stop loss and losing positions are held,
@@ -14,9 +14,13 @@ through a portable Wine staging build, with an on-chart control panel.
 - Waves of **10, then 15, then 20** positions (20 repeats), half buys and half sells, opened together.
 - Each position closes as soon as its profit reaches **+0.50**. Losing positions are held until
   they turn profitable.
-- The next wave opens when **50%** of the current wave has closed in profit.
-- Limits: max **60** open positions; no new positions below **300%** margin level or above
-  **0.40** spread; emergency close-all below **100%** margin level.
+- The next wave opens when **50%** of the current wave has closed in profit. The size steps up
+  (10 -> 15 -> 20) **only if the previous wave was in profit** (closed + still open positions of
+  that wave); otherwise the next wave keeps the same size.
+- Works on any symbol (gold, oil, BTC, ...). One chart per symbol.
+- Limits: max **60** open positions; no new positions below **300%** margin level or when the
+  spread costs more than **60%** of the take profit per position; emergency close-all below
+  **100%** margin level. The panel footer says why it is not opening positions.
 - Optional (off by default): max holding time (`InpMaxHoldMin`) and basket stop
   (`InpBasketStopPct`, close all when equity is that % below balance).
 

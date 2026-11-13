@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "7.00"
+#property version   "7.10"
 #property description "Grid waves: fixed-lot buys and sells together, each closed at a small profit."
 #property description "No stop losses. Runs on DEMO accounts and in the Strategy Tester only."
 
@@ -20,11 +20,12 @@ input double        InpLot                  = 0.01;          // Lot per position
 input string        InpWaves                = "10,15,20";    // Positions per wave (half buys, half sells); the last size repeats
 input double        InpTakeProfit           = 0.50;          // Close a position when its profit reaches this (account currency)
 input double        InpNextWavePct          = 50;            // Open the next wave when this % of the current wave has closed in profit
+                                                             // The wave size steps up (10 -> 15 -> 20) only when the previous wave was in profit
 input int           InpMaxOpen              = 60;            // Max positions open at once
 input double        InpMinMarginLevel       = 300;           // No new positions below this margin level % (0 = off)
 input int           InpMaxHoldMin           = 0;             // Close any position older than N minutes (0 = off: losers wait)
 input double        InpBasketStopPct        = 0;             // Close ALL positions if equity is this % below balance (0 = off)
-input double        InpMaxSpread            = 0.40;          // Do not open new positions when the spread is above this
+input double        InpMaxSpreadCostPct     = 60;            // No new positions when the spread costs more than this % of the take profit (0 = off)
 
 input group "Account safety"
 input double        InpEmergencyMarginLevel = 100;           // Emergency: close all if margin level falls below this % (0 = off)
@@ -67,6 +68,10 @@ int            g_opened       = 0;    // positions opened in the current wave
 int            g_wins         = 0;    // positions closed in profit (this session)
 datetime       g_lastOpen     = 0;
 string         g_status       = "not started";
+string         g_block        = "";   // why no new positions right now ("" = none)
+bool           g_started      = false;// first wave of this session opened
+double         g_waveRealized = 0;    // closed P/L of the current wave
+double         g_lastWaveResult = 0;
 
 long           g_reasonPos[];         // positions closed by the bot, and why (journal)
 string         g_reasonText[];
@@ -100,6 +105,7 @@ string StateKey()
   }
 string ManualStopKey() { return StateKey() + "_manualstop"; }
 bool   ManualStop()    { return GlobalVariableCheck(ManualStopKey()); }
+string WaveKey()       { return "XS_wave_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + IntegerToString(InpMagic) + "_" + _Symbol; }
 
 bool IsRealAccount()
   {
@@ -227,10 +233,14 @@ int OnInit()
      }
    if(MQLInfoInteger(MQL_TESTER))
       g_state = BOT_RUNNING;
+   // continue the wave numbering and size after a restart (new wave numbers never mix with old positions)
+   if(!MQLInfoInteger(MQL_TESTER) && GlobalVariableCheck(WaveKey()))
+     {
+      g_wave    = (int)GlobalVariableGet(WaveKey());
+      g_waveIdx = (int)MathMin(GlobalVariableGet(WaveKey() + "_idx"), ArraySize(g_sizes) - 1);
+     }
    g_wasConnected = (bool)TerminalInfoInteger(TERMINAL_CONNECTED);
 
-   if(StringFind(_Symbol, "XAU") < 0 && StringFind(_Symbol, "GOLD") < 0)
-      Msg("Warning: attach this EA to a gold (XAUUSD) chart.", CLR_AMBER);
    if(IsRealAccount())
       Msg("REAL account: grid mode is disabled (no stop losses). Use a demo account.", CLR_RED);
 
@@ -328,54 +338,85 @@ void Grid(const bool allowNew)
 
    int b, s;
    int waveSize = (g_waveIdx >= 0) ? g_sizes[g_waveIdx] : 0;
-   int inWave   = (g_wave > 0) ? CountPositions(g_wave, b, s) : 0;
+   int inWave   = (g_started && g_wave > 0) ? CountPositions(g_wave, b, s) : 0;
    int closed   = g_opened - inWave;
    int nOpen    = CountPositions(0, b, s);
    g_status = StringFormat("Wave %d: %d/%d open   Total %d (B%d / S%d)   Wins %d", g_wave, inWave, waveSize,
                            nOpen, b, s, g_wins);
 
-   if(!allowNew || now == g_lastOpen)
+   if(!allowNew)
+     {
+      g_block = "";
+      return;
+     }
+   if(now == g_lastOpen)
       return;
    g_lastOpen = now;
 
-   string block = PlatformBlockReason();
-   if(block != "")
+   g_block = PlatformBlockReason();
+   if(g_block != "")
+      return;
+   if(g_risk.Locked())
      {
-      g_status = "Not trading: " + block;
+      g_block = g_risk.LockText();
       return;
      }
-   if(g_risk.Locked())
-      return;
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol, tick))
-      return;
-   if(InpMaxSpread > 0 && tick.ask - tick.bid > InpMaxSpread)
      {
-      g_status = StringFormat("Waiting: spread %.2f above %.2f", tick.ask - tick.bid, InpMaxSpread);
+      g_block = "no price for " + _Symbol;
+      return;
+     }
+   double cost = SpreadCost();
+   if(InpMaxSpreadCostPct > 0 && cost > InpTakeProfit * InpMaxSpreadCostPct / 100.0)
+     {
+      g_block = StringFormat("spread cost %.2f above limit %.2f", cost,
+                             InpTakeProfit * InpMaxSpreadCostPct / 100.0);
       return;
      }
 
-   bool nextWave = (g_wave == 0) || (g_opened >= waveSize && closed * 100.0 >= InpNextWavePct * waveSize);
+   bool nextWave = !g_started || (g_opened >= waveSize && closed * 100.0 >= InpNextWavePct * waveSize);
    if(nextWave)
      {
-      g_waveIdx = MathMin(g_waveIdx + 1, ArraySize(g_sizes) - 1);
+      string why;
+      if(!g_started)
+        {
+         g_waveIdx = MathMax(g_waveIdx, 0);
+         why = (g_wave == 0) ? "first wave" : "restart: same size as before";
+        }
+      else
+        {
+         double result = g_waveRealized + WaveFloating(g_wave);
+         g_lastWaveResult = result;
+         if(result > 0)
+           {
+            g_waveIdx = MathMin(g_waveIdx + 1, ArraySize(g_sizes) - 1);
+            why = StringFormat("wave %d made %+.2f: size up", g_wave, result);
+           }
+         else
+            why = StringFormat("wave %d made %+.2f: same size", g_wave, result);
+        }
+      g_started = true;
       g_wave++;
       g_opened = 0;
+      g_waveRealized = 0;
       waveSize = g_sizes[g_waveIdx];
-      Msg(StringFormat("Wave %d: opening %d positions", g_wave, waveSize), CLR_BLUE);
+      GlobalVariableSet(WaveKey(), g_wave);
+      GlobalVariableSet(WaveKey() + "_idx", g_waveIdx);
+      Msg(StringFormat("Wave %d: %d positions (%s)", g_wave, waveSize, why), CLR_BLUE);
      }
 
    while(g_opened < waveSize)
      {
       if(CountPositions(0, b, s) >= InpMaxOpen)
         {
-         g_status = StringFormat("Max %d open positions reached: waiting", InpMaxOpen);
+         g_block = StringFormat("max %d open positions: waiting for closes", InpMaxOpen);
          return;
         }
       if(InpMinMarginLevel > 0 && AccountInfoDouble(ACCOUNT_MARGIN) > 0
          && AccountInfoDouble(ACCOUNT_MARGIN_LEVEL) < InpMinMarginLevel)
         {
-         g_status = StringFormat("Margin level below %.0f%%: no new positions", InpMinMarginLevel);
+         g_block = StringFormat("margin level below %.0f%%: no new positions", InpMinMarginLevel);
          return;
         }
       int dir = (g_opened % 2 == 0) ? 1 : -1;
@@ -385,6 +426,7 @@ void Grid(const bool allowNew)
       ulong pos = g_exec.OpenNoStop(dir, InpLot, InpTradeComment + ":GRID:" + IntegerToString(g_wave), err);
       if(pos == 0)
         {
+         g_block = "order rejected: " + err;
          Msg("Order failed: " + err, CLR_RED);
          return;   // retry next second
         }
@@ -392,6 +434,35 @@ void Grid(const bool allowNew)
                   dir > 0 ? tk.ask : tk.bid, tk.ask - tk.bid, 0, 0, 0, 0, 0, 0, "");
       g_opened++;
      }
+  }
+
+// Money lost to the spread when one position of InpLot opens (account currency).
+double SpreadCost()
+  {
+   MqlTick tick;
+   double ts = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double tv = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   if(!SymbolInfoTick(_Symbol, tick) || ts <= 0)
+      return 0;
+   return (tick.ask - tick.bid) / ts * tv * InpLot;
+  }
+
+// Open profit of the positions of one wave.
+double WaveFloating(const int wave)
+  {
+   double sum = 0;
+   string tag = ":GRID:" + IntegerToString(wave);
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(PositionGetTicket(i) == 0 || !IsOurs())
+         continue;
+      string c = PositionGetString(POSITION_COMMENT);
+      int p = StringFind(c, tag);
+      if(p < 0 || p + StringLen(tag) != StringLen(c))
+         continue;
+      sum += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+     }
+   return sum;
   }
 
 //==================================================================
@@ -580,6 +651,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
       return;
    bool ours = false;
    long inMsc = 0;
+   string inComment = "";
    for(int i = 0; i < HistoryDealsTotal(); i++)
      {
       ulong d = HistoryDealGetTicket(i);
@@ -589,6 +661,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
         {
          ours  = true;
          inMsc = HistoryDealGetInteger(d, DEAL_TIME_MSC);
+         inComment = HistoryDealGetString(d, DEAL_COMMENT);
          double c = HistoryDealGetDouble(d, DEAL_COMMISSION) + HistoryDealGetDouble(d, DEAL_FEE);
          comm   += c;
          profit += c;
@@ -596,6 +669,10 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
      }
    if(!ours)
       return;
+   string tag = ":GRID:" + IntegerToString(g_wave);
+   int tp = StringFind(inComment, tag);
+   if(g_wave > 0 && tp >= 0 && tp + StringLen(tag) == StringLen(inComment))
+      g_waveRealized += profit;
    string why = TakeCloseReason(posId);
    if(why == "")
       why = (reason == DEAL_REASON_SO) ? "stop out" : "other";
@@ -745,7 +822,7 @@ void BuildPanel()
    MkButton("b_min", PANEL_W - 146, 8, 22, 20, "-", CLR_GREY, clrWhite, 10);
    MkLabel("info", 14, 44, " ", CLR_MUTED, 8);
 
-   string titles[6] = {"BALANCE", "EQUITY", "DAY P/L (CLOSED + OPEN)", "FLOATING P/L", "SPREAD", "MARGIN LEVEL"};
+   string titles[6] = {"BALANCE", "EQUITY", "DAY P/L (CLOSED + OPEN)", "FLOATING P/L", "SPREAD (COST / POSITION)", "MARGIN LEVEL"};
    for(int i = 0; i < 6; i++)
      {
       int x = 14 + (i % 3) * 178;
@@ -816,12 +893,18 @@ void UpdatePanel()
    SetText("s_v1", DoubleToString(eq, 2) + " " + cur, CLR_TEXT);
    SetText("s_v2", Signed(g_risk.DayPL()), PLColor(g_risk.DayPL()));
    SetText("s_v3", Signed(eq - bal), PLColor(eq - bal));
-   SetText("s_v4", DoubleToString(spread, _Digits), (InpMaxSpread > 0 && spread > InpMaxSpread) ? CLR_RED : CLR_TEXT);
+   double cost = SpreadCost();
+   SetText("s_v4", DoubleToString(spread, _Digits) + "  (" + DoubleToString(cost, 2) + ")",
+           (InpMaxSpreadCostPct > 0 && cost > InpTakeProfit * InpMaxSpreadCostPct / 100.0) ? CLR_RED : CLR_TEXT);
    SetText("s_v5", ml > 0 ? DoubleToString(ml, 0) + "%" : "-", (ml > 0 && ml < InpMinMarginLevel) ? CLR_RED : CLR_TEXT);
 
    SetText("grid1", g_status, CLR_TEXT);
-   SetText("grid2", StringFormat("Lot %.2f   Close at +%.2f   Waves %s   Max open %d", InpLot, InpTakeProfit,
-                                 InpWaves, InpMaxOpen), CLR_MUTED);
+   if(g_started && g_wave > 1)
+      SetText("grid2", StringFormat("This wave so far %+.2f    Previous wave %+.2f",
+                                    g_waveRealized + WaveFloating(g_wave), g_lastWaveResult), CLR_MUTED);
+   else
+      SetText("grid2", StringFormat("Lot %.2f   Close at +%.2f   Waves %s   Max open %d", InpLot, InpTakeProfit,
+                                    InpWaves, InpMaxOpen), CLR_MUTED);
 
    int row = 0, total = 0;
    datetime now = TimeCurrent();
@@ -863,13 +946,15 @@ void UpdatePanel()
    string cond;
    if(g_risk.Locked())
       cond = "Locked: " + g_risk.LockText();
+   else if(g_state == BOT_RUNNING && g_block != "")
+      cond = "Not opening: " + g_block;
    else if(g_state == BOT_RUNNING)
       cond = "Running: opening waves, closing each position at +" + DoubleToString(InpTakeProfit, 2);
    else if(InpAutoStart && ManualStop())
       cond = "Stopped by you: press START to resume.";
    else
       cond = "Stopped.";
-   SetText("f_cond", cond, g_risk.Locked() ? CLR_RED : CLR_MUTED);
+   SetText("f_cond", cond, (g_risk.Locked() || (g_state == BOT_RUNNING && g_block != "")) ? CLR_AMBER : CLR_MUTED);
    ChartRedraw();
   }
 //+------------------------------------------------------------------+
