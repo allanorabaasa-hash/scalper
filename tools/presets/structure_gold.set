@@ -1,7 +1,8 @@
-; XAUScalper v15.00 market structure - GOLD: test on XAUUSDm
-InpBiasTF=5
+; XAUScalper v16.00 market structure - GOLD: test on XAUUSDm
 InpEntryTF=1
 InpSwingBars=3
+InpFreshBars=3
+InpMaxChaseR=0.5
 InpRewardR=2.0
 InpBreakevenR=1.0
 InpMinStopPct=0.03

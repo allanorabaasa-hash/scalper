@@ -4,20 +4,28 @@ MetaTrader 5 Expert Advisor for **gold (XAUUSD) and bitcoin (BTCUSD)** that trad
 structure only, no indicators**, with an on-chart control panel. Runs on Kali Linux through a portable Wine staging build.
 Previous strategies are in git history only.
 
-## Strategy (v15.00)
+## Strategy (v16.00): M1 market structure + real ticks
 
-**Side (M5 structure).** Swing points: a candle whose high (low) is above (below) the 3 candles
-on each side. Higher highs + higher lows, and price above the last higher low = **buy side**.
-Lower highs + lower lows, and price below the last lower high = **sell side**. Anything else =
-range / unclear: no trade.
+Everything is read on the **M1** chart, closed candles only, no indicators.
 
-**Setup (M1 pullback).** On the buy side the bot waits for an M1 pullback (a lower high). That
-lower high becomes the trigger level; the setup is re-checked on every closed M1 candle.
+**Reading the chart.** On every closed candle (and as soon as the bot is attached) it scans the
+last 300 candles left to right like a trader: swing points are candles higher (lower) than the
+3 candles on each side; a close above the latest unbroken swing high is a bullish break, a close
+below the latest unbroken swing low a bearish break. A break against the current structure is a
+**shift** (change of character). Result: the current structure (UP / DOWN), when and where it
+last broke or shifted, and the swing behind that break.
 
-**Trigger (live tick + real tick flow).** The entry fires on the tick that breaks the level, not
-at the candle close, and only if the real ticks of the last 15 seconds confirm it: at least 60%
-of the price-changing ticks moved in the trade's direction and price is higher (buys) / lower
-(sells) than 15 seconds ago. One batch per broken level. Sell side mirrored.
+**Entries.**
+- **Fresh break / shift:** if the structure broke or shifted in the last 3 candles (also when
+  the bot is just attached to a chart that has already shifted), it trades it at once, as long
+  as price has not run more than 0.5 x the stop past the broken level. Stop beyond the swing
+  behind the break.
+- **Continuation:** in an UP structure, the swing high made by the pullback after the break is
+  armed; the live tick that breaks it triggers the buy, stop below the pullback's low. Mirrored.
+
+**Real ticks (when available).** Before any entry, the ticks of the last 15 seconds must agree:
+at least 60% of the price-changing ticks in the trade's direction and price moved that way. If
+the broker or tester provides no tick data, the check is skipped instead of blocking trades.
 
 **Stop and target.** Stop beyond the pullback's extreme (including the current candle) plus
 spread and a small buffer. Target 2 x the stop distance (2R). At +1R every position's stop
@@ -64,8 +72,8 @@ BTCUSDm, preset `structure_btc.set`. Results go in `docs/VALIDATION.md`.
 ## Panel
 
 START, STOP (no new batches; open positions keep their SL / TP), CLOSE ALL, EMERGENCY. Shows
-balance, equity, day and open P/L, next batch size, next high-impact news, the M5 structure,
-the M1 swing high/low, the real-tick reading, the last batch result, positions with SL / TP, and why it is waiting.
+balance, equity, day and open P/L, next batch size, next high-impact news, the M1 structure
+(and when it last broke or shifted), the armed level, the real-tick reading, the last batch result, positions with SL / TP, and why it is waiting.
 
 ## Layout
 
