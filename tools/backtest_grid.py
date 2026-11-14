@@ -22,6 +22,7 @@ Price model
 
 Usage
   python3 tools/backtest_grid.py --bars XAUUSDm_M1.csv --daily XAUUSDm_D1.csv
+  python3 tools/backtest_grid.py --market btc --bars BTCUSDm_M1.csv --daily BTCUSDm_D1.csv
   python3 tools/backtest_grid.py --demo      # synthetic prices: only checks the code runs
 """
 
@@ -40,6 +41,10 @@ DEFAULTS = dict(
     contract_size=100.0,     # oz per lot
     spread=0.25,
 )
+
+# Bitcoin settings (same as the EA's Bitcoin inputs): moves about 50x larger than gold, so the
+# spacing is a $150 move, and 0.02 lot makes +$4 / -$3 a $200 / $150 move. 1 lot = 1 BTC.
+BTC = dict(lot=0.02, spacing=150.0, contract_size=1.0, spread=6.5)
 
 
 # ----------------------------------------------------------------------------
@@ -193,7 +198,7 @@ def run_backtest(bars, daily, params=None):
 
 
 def report(grids, positions, equity, locked_days, p):
-    print(f"\nControlled Grid   start {p['balance']:.2f}   lot {p['lot']}   spacing {p['spacing']}   levels {p['max_levels']}   "
+    print(f"\nControlled Grid ({'BTC' if p['contract_size'] == 1 else 'gold'})   start {p['balance']:.2f}   lot {p['lot']}   spacing {p['spacing']}   levels {p['max_levels']}   "
           f"pos +{p['pos_tp']}/-{p['pos_cut']}   basket +{p['basket_tp']}/-{p['basket_stop']}")
     if len(equity):
         print(f"Period: {equity.index[0]}  to  {equity.index[-1]}")
@@ -252,8 +257,9 @@ def main(argv=None):
     ap.add_argument("--bars", help="M1 CSV from ExportBars")
     ap.add_argument("--daily", help="D1 CSV from ExportBars")
     ap.add_argument("--demo", action="store_true", help="synthetic prices (code check only)")
+    ap.add_argument("--market", choices=["gold", "btc"], default="gold", help="settings to use")
     ap.add_argument("--balance", type=float, default=DEFAULTS["balance"])
-    ap.add_argument("--spread", type=float, default=DEFAULTS["spread"])
+    ap.add_argument("--spread", type=float, help="default: 0.25 gold, 6.5 btc")
     ap.add_argument("--daily-loss", type=float, default=DEFAULTS["daily_loss_pct"], help="%% (0 = off)")
     ap.add_argument("--from", dest="date_from")
     ap.add_argument("--to", dest="date_to")
@@ -272,8 +278,11 @@ def main(argv=None):
     if a.date_to:
         bars = bars[bars.time < pd.Timestamp(a.date_to)].reset_index(drop=True)
 
-    grids, positions, equity, locked, p = run_backtest(
-        bars, daily, dict(balance=a.balance, spread=a.spread, daily_loss_pct=a.daily_loss))
+    params = dict(BTC) if a.market == "btc" else {}
+    params.update(balance=a.balance, daily_loss_pct=a.daily_loss)
+    if a.spread is not None:
+        params["spread"] = a.spread
+    grids, positions, equity, locked, p = run_backtest(bars, daily, params)
     report(grids, positions, equity, locked, p)
     if a.grids_out and len(grids):
         grids.to_csv(a.grids_out, index=False)

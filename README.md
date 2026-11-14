@@ -4,20 +4,28 @@ MetaTrader 5 Expert Advisor for XAUUSD with an on-chart control panel, plus a Py
 with the same rules. Runs on Kali Linux through a portable Wine staging build. Previous
 strategies are in git history only.
 
-## Strategy (v12.00): Controlled Grid with early profits and early loss cuts
+## Strategy (v13.00): Controlled Grid for Gold or Bitcoin
 
-| Rule | Setting (input) |
-|---|---|
-| Direction | Daily EMA 21 > EMA 55: buy grids only; below: sell grids only (last completed daily candles) |
-| No new grid | daily EMAs crossing or flat (gap < 0.10 x daily ATR 14) |
-| Grid | first 0.01 position at once; one more 0.01 every **$3.00** against the last level; max **8** levels; lot never increased |
-| Individual take profit | each position closes at **+$4** (set on the broker's server) |
-| Early loss cut | each position closes at **-$3** (was -$5 in v12.00), that position only (set on the broker's server) |
-| Basket take profit | total floating **+$12**: close all |
-| Hard basket stop | total floating **-$18**: close all |
-| Grid end | when it has no open positions; the next grid starts right away, until STOP |
-| One grid | one at a time, never opposite |
-| Daily loss limit | day down **4%** (closed + open): no new grid until the next server day |
+Input **Market**: *Auto* (from the chart symbol), *Gold* or *Bitcoin*. Each market has its own
+settings. Attach the bot to the chart of the market you want; attach it to both charts to run
+both (each trades only when its own daily trend is valid; they share the account's margin and
+the daily loss limit; STOP on one chart does not stop the other).
+
+| Rule | Gold (XAUUSDm) | Bitcoin (BTCUSDm) |
+|---|---|---|
+| Direction | Daily EMA 21 vs EMA 55 of that symbol; no new grid if flat or crossing | same |
+| Lot per level (fixed) | 0.01 | 0.02 |
+| Grid spacing | $3 move | $150 move |
+| Max levels | 8 | 8 |
+| Each position: take profit | +$4 (a $4 move) | +$4 (a $200 move) |
+| Each position: loss cut | -$3 (a $3 move) | -$3 (a $150 move) |
+| Basket take profit / hard stop | +$12 / -$18 | +$12 / -$18 |
+| Daily loss limit | 4% | 4% (shared) |
+
+Bitcoin moves about 50x more than gold in dollars, so the Bitcoin settings are scaled to its
+size: the money per win and per loss is the same as on gold. With 0.01 lot and the gold
+settings, BTC's $6 spread was larger than the $3 spacing and all 8 levels opened at once. A
+guard now blocks new positions whenever the spread is more than half the spacing.
 
 Every position carries its own TP and loss cut on the broker's server, so they work even when
 MT5 or the internet is down. The basket rules need MT5 running.
@@ -38,16 +46,17 @@ cd ~/scalper && git pull
 
 MetaEditor (F4), F7 on `Experts/XAUScalper.mq5` and `Scripts/XAUScalper/ExportBars.mq5`.
 Attach **XAUScalper** to one XAUUSDm chart (any timeframe), tick *Allow Algo Trading*, turn on
-**Algo Trading**. Strategy Tester preset: `tools/presets/grid.set`.
+**Algo Trading**. Strategy Tester presets: `tools/presets/grid.set` (gold), `tools/presets/btc.set` (bitcoin).
 
 ## Python backtest
 
-1. In MT5 run **ExportBars** on the XAUUSDm chart (timeframe M1). It writes `XAUUSDm_M1.csv`
+1. In MT5 run **ExportBars** on the XAUUSDm chart and on the BTCUSDm chart (timeframe M1). It writes `XAUUSDm_M1.csv`
    and `XAUUSDm_D1.csv` to Common/Files.
 2. ```bash
    COMMON=$(find ~/.mt5/drive_c/users -type d -path '*MetaQuotes/Terminal/Common/Files' | head -1)
    python3 tools/backtest_grid.py --bars "$COMMON/XAUUSDm_M1.csv" --daily "$COMMON/XAUUSDm_D1.csv"
    python3 tools/backtest_grid.py ... --daily-loss 0 --from 2026-08-01 --grids-out grids.csv
+   python3 tools/backtest_grid.py --market btc --bars "$COMMON/BTCUSDm_M1.csv" --daily "$COMMON/BTCUSDm_D1.csv"
    python3 -m unittest tools/test_backtest_grid.py
    ```
 
@@ -73,6 +82,6 @@ src/Include/XAUScalper/*.mqh       risk manager (day stats, emergency), executio
 src/Scripts/ExportBars.mq5         exports bars for the Python backtest
 tools/backtest_grid.py             Python backtest (+ tests)
 tools/analyze_trades.py            report from the EA journal (+ tests)
-tools/presets/grid.set             Strategy Tester preset
+tools/presets/grid.set, btc.set    Strategy Tester presets
 scripts/                           install, start/stop MT5, auto-start
 ```

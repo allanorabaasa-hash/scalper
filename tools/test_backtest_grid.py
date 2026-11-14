@@ -58,3 +58,32 @@ class Rules(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Bitcoin(unittest.TestCase):
+    def daily(self, n=80):
+        days = pd.date_range("2025-10-01", periods=n, freq="D")
+        close = np.linspace(60000, 70000, n)
+        return pd.DataFrame({"time": days, "open": close, "high": close + 50, "low": close - 50, "close": close})
+
+    def test_btc_take_profit_is_a_200_move(self):
+        p = dict(bt.BTC, spread=0.0, daily_loss_pct=0)
+        grids, pos, *_ = bt.run_backtest(bars_from([67000, 67150, 67201]), self.daily(), p)
+        self.assertEqual(pos.iloc[0].reason, "take profit")
+        self.assertAlmostEqual(pos.iloc[0].pnl, 4.0)
+
+    def test_btc_cut_is_a_150_move(self):
+        # cut (-$3 = $150) and the next level ($150) fall on the same price: the position is cut,
+        # the grid ends, and a new grid starts (the EA does the same)
+        p = dict(bt.BTC, spread=0.0, daily_loss_pct=0)
+        grids, pos, *_ = bt.run_backtest(bars_from([67000, 66840, 66840]), self.daily(), p)
+        cut = pos[pos.reason == "loss cut"]
+        self.assertAlmostEqual(cut.iloc[0].pnl, -3.0)
+        self.assertGreaterEqual(len(grids), 2)
+
+    def test_btc_level_every_150(self):
+        p = dict(bt.BTC, spread=0.0, daily_loss_pct=0, pos_cut=5.0)
+        grids, pos, *_ = bt.run_backtest(bars_from([67000, 66860, 66860]), self.daily(), p)
+        self.assertEqual(grids.iloc[0].levels, 1)
+        grids, pos, *_ = bt.run_backtest(bars_from([67000, 66845, 66845]), self.daily(), p)
+        self.assertEqual(grids.iloc[0].levels, 2)

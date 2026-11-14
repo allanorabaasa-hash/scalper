@@ -4,8 +4,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "12.20"
-#property description "Controlled Grid: daily EMA 21/55 direction, 0.01 every $3 against, max 8 levels."
+#property version   "13.00"
+#property description "Controlled Grid for Gold or Bitcoin (input Market): daily EMA 21/55 direction, max 8 levels."
 #property description "Each position: TP +$4 / loss cut -$3 (on the server). Basket: TP +$12, stop -$18. Daily limit 4%."
 
 #include <XAUScalper\RiskManager.mqh>
@@ -20,16 +20,33 @@ input int             InpEmaFast            = 21;            // Daily EMA fast
 input int             InpEmaSlow            = 55;            // Daily EMA slow
 input double          InpFlatGapAtr         = 0.10;          // "Flat": EMA gap below this x ATR(D1,14) -> no new grid
 
-input group "Grid"
-input double          InpLot                = 0.01;          // Lot on every level (fixed, never increased)
-input double          InpSpacing            = 3.00;          // Grid spacing (price, USD)
-input int             InpMaxLevels          = 8;             // Maximum levels per grid
+enum ENUM_MARKET
+  {
+   MARKET_AUTO = 0,   // Auto (from the chart symbol)
+   MARKET_GOLD = 1,   // Gold (XAUUSD)
+   MARKET_BTC  = 2    // Bitcoin (BTCUSD)
+  };
 
-input group "Exits"
-input double          InpPosTP              = 4.0;           // Individual take profit: close a position at +USD
-input double          InpPosLossCut         = 3.0;           // Early loss cut: close a position at -USD (was 5)
-input double          InpBasketTP           = 12.0;          // Basket take profit: close all at +USD floating
-input double          InpBasketStop         = 18.0;          // Hard basket stop: close all at -USD floating
+input group "Market"
+input ENUM_MARKET     InpMarket             = MARKET_AUTO;   // Which settings to use (attach to that symbol's chart)
+
+input group "Gold settings (XAUUSD)"
+input double          InpG_Lot              = 0.01;          // Lot on every level (fixed)
+input double          InpG_Spacing          = 3.00;          // Grid spacing (price move, USD)
+input int             InpG_MaxLevels        = 8;             // Maximum levels per grid
+input double          InpG_PosTP            = 4.0;           // Each position: take profit at +USD
+input double          InpG_PosLossCut       = 3.0;           // Each position: loss cut at -USD
+input double          InpG_BasketTP         = 12.0;          // Basket take profit (+USD)
+input double          InpG_BasketStop       = 18.0;          // Hard basket stop (-USD)
+
+input group "Bitcoin settings (BTCUSD), scaled to BTC's ~50x larger moves"
+input double          InpB_Lot              = 0.02;          // Lot on every level (fixed)
+input double          InpB_Spacing          = 150.0;         // Grid spacing (price move, USD)
+input int             InpB_MaxLevels        = 8;             // Maximum levels per grid
+input double          InpB_PosTP            = 4.0;           // Each position: take profit at +USD (0.02 lot: a $200 move)
+input double          InpB_PosLossCut       = 3.0;           // Each position: loss cut at -USD (0.02 lot: a $150 move)
+input double          InpB_BasketTP         = 12.0;          // Basket take profit (+USD)
+input double          InpB_BasketStop       = 18.0;          // Hard basket stop (-USD)
 
 input group "Risk controls"
 input double          InpDailyLossPct       = 4.0;           // No new grid for the rest of the day after this % loss (0 = off)
@@ -77,6 +94,11 @@ int            g_gridDir   = 0;       // active grid: direction, levels opened, 
 int            g_gridLevels = 0;      // (persisted in global variables: survives restarts)
 double         g_lastLevel = 0;
 
+// active settings (from the Gold or Bitcoin inputs)
+int            g_market      = MARKET_GOLD;
+double         g_lot = 0.01, g_spacing = 3, g_posTP = 4, g_posCut = 3, g_basketTP = 12, g_basketStop = 18;
+int            g_maxLevels   = 8;
+
 long           g_reasonPos[];         // positions closed by the bot, and why (journal)
 string         g_reasonText[];
 
@@ -106,7 +128,7 @@ string StateKey()
   {
    return "XS_state_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + IntegerToString(InpMagic);
   }
-string ManualStopKey() { return StateKey() + "_manualstop"; }
+string ManualStopKey() { return StateKey() + "_manualstop_" + _Symbol; }   // per chart: STOP on gold does not stop BTC
 bool   ManualStop()    { return GlobalVariableCheck(ManualStopKey()); }
 
 bool IsRealAccount()
@@ -250,7 +272,21 @@ int OnInit()
    ChartSetInteger(0, CHART_FOREGROUND, false);
    ChartSetInteger(0, CHART_SHOW_ONE_CLICK, false);
 
-   if(InpLot <= 0 || InpSpacing <= 0 || InpMaxLevels < 1 || InpPosTP <= 0 || InpPosLossCut <= 0
+   g_market = InpMarket;
+   if(g_market == MARKET_AUTO)
+      g_market = (StringFind(_Symbol, "BTC") >= 0) ? MARKET_BTC : MARKET_GOLD;
+   if(g_market == MARKET_BTC)
+     {
+      g_lot = InpB_Lot;  g_spacing = InpB_Spacing;  g_maxLevels = InpB_MaxLevels;  g_posTP = InpB_PosTP;
+      g_posCut = InpB_PosLossCut;  g_basketTP = InpB_BasketTP;  g_basketStop = InpB_BasketStop;
+     }
+   else
+     {
+      g_lot = InpG_Lot;  g_spacing = InpG_Spacing;  g_maxLevels = InpG_MaxLevels;  g_posTP = InpG_PosTP;
+      g_posCut = InpG_PosLossCut;  g_basketTP = InpG_BasketTP;  g_basketStop = InpG_BasketStop;
+     }
+
+   if(g_lot <= 0 || g_spacing <= 0 || g_maxLevels < 1 || g_posTP <= 0 || g_posCut <= 0
       || InpEmaSlow <= InpEmaFast)
      {
       Print("XAUScalper: check the inputs (lot, spacing, levels, TP and loss cut above 0; slow EMA above fast)");
@@ -270,7 +306,7 @@ int OnInit()
    // Risk manager: day statistics and the margin-level emergency only (the grid has its own limits).
    RiskConfig cfg;
    cfg.magic = InpMagic;  cfg.riskPct = 1.0;  cfg.minLotMaxRiskPct = 0;  cfg.maxDailyLossPct = 0;
-   cfg.dailyTargetPct = 0;  cfg.maxConsecLosses = 0;  cfg.maxPositions = InpMaxLevels;  cfg.maxDailyTrades = 0;
+   cfg.dailyTargetPct = 0;  cfg.maxConsecLosses = 0;  cfg.maxPositions = g_maxLevels;  cfg.maxDailyTrades = 0;
    cfg.minSecBetweenTrades = 0;  cfg.cooldownAfterLossMin = 0;  cfg.emergencyDDPct = 0;
    cfg.emergencyMarginLevel = InpEmergencyMarginLevel;  cfg.marginBufferPct = 0;
    cfg.emergencyPolicy = EMERGENCY_CLOSE_ALL;
@@ -289,8 +325,11 @@ int OnInit()
    DayStartBalance();
    LoadGrid();
 
-   if(StringFind(_Symbol, "XAU") < 0 && StringFind(_Symbol, "GOLD") < 0)
-      Msg("Warning: the $ settings are made for gold (XAUUSD).", CLR_AMBER);
+   bool symGold = StringFind(_Symbol, "XAU") >= 0 || StringFind(_Symbol, "GOLD") >= 0;
+   bool symBtc  = StringFind(_Symbol, "BTC") >= 0;
+   if((g_market == MARKET_GOLD && !symGold) || (g_market == MARKET_BTC && !symBtc))
+      Msg(StringFormat("Warning: %s settings on a %s chart.", g_market == MARKET_BTC ? "Bitcoin" : "Gold", _Symbol),
+          CLR_AMBER);
    if(IsRealAccount() && !InpAllowReal)
       Msg("REAL account: no new trades unless 'Allow trading on a REAL account' is on.", CLR_RED);
 
@@ -366,14 +405,14 @@ void EndGrid()
    SaveGrid();
   }
 
-// Price distance that gains or loses `usd` on InpLot (0.01 lot of gold: $1 per $1 move).
+// Price distance that gains or loses `usd` on g_lot (0.01 lot of gold: $1 per $1 move).
 double UsdToDistance(const double usd)
   {
    double ts = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
    double tv = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
    if(ts <= 0 || tv <= 0)
       return 0;
-   return usd / (InpLot * tv / ts);
+   return usd / (g_lot * tv / ts);
   }
 
 // Every tick:
@@ -390,7 +429,7 @@ void Grid()
       if(t == 0 || !IsOurs())
          continue;
       double net = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
-      string why = (net >= InpPosTP) ? "take profit" : ((net <= -InpPosLossCut) ? "loss cut" : "");
+      string why = (net >= g_posTP) ? "take profit" : ((net <= -g_posCut) ? "loss cut" : "");
       if(why == "")
          continue;
       string err;
@@ -405,9 +444,9 @@ void Grid()
    if(g.levels > 0)
      {
       string why = "";
-      if(InpBasketTP > 0 && g.pl >= InpBasketTP)
+      if(g_basketTP > 0 && g.pl >= g_basketTP)
          why = "basket take profit";
-      else if(InpBasketStop > 0 && g.pl <= -InpBasketStop)
+      else if(g_basketStop > 0 && g.pl <= -g_basketStop)
          why = "hard basket stop";
       if(why != "")
         {
@@ -450,16 +489,22 @@ void Grid()
    if(!SymbolInfoTick(_Symbol, tick))
       return;
 
+   if(tick.ask - tick.bid > g_spacing / 2.0)
+     {
+      g_block = StringFormat("spread %.2f too wide for the %.2f spacing", tick.ask - tick.bid, g_spacing);
+      return;
+     }
+
    // 4. next level
    if(g_gridDir != 0)
      {
-      if(g_gridLevels >= InpMaxLevels)
+      if(g_gridLevels >= g_maxLevels)
         {
-         g_block = StringFormat("all %d levels used: no more adding", InpMaxLevels);
+         g_block = StringFormat("all %d levels used: no more adding", g_maxLevels);
          return;
         }
       double price = (g_gridDir > 0) ? tick.ask : tick.bid;
-      if(g_gridDir * (g_lastLevel - price) >= InpSpacing)
+      if(g_gridDir * (g_lastLevel - price) >= g_spacing)
          OpenLevel(g_gridDir);
       g_block = "";
       return;
@@ -487,8 +532,8 @@ void Grid()
 
 bool OpenLevel(const int dir)
   {
-   double sl = UsdToDistance(InpPosLossCut);
-   double tp = UsdToDistance(InpPosTP);
+   double sl = UsdToDistance(g_posCut);
+   double tp = UsdToDistance(g_posTP);
    if(sl <= 0 || tp <= 0)
      {
       g_block = "no tick value for " + _Symbol;
@@ -504,14 +549,14 @@ bool OpenLevel(const int dir)
    double fill = 0;
    MqlTick tk;
    SymbolInfoTick(_Symbol, tk);
-   ulong pos = g_exec.Open(dir, InpLot, sl, tp, InpTradeComment + ":L" + IntegerToString(level), err, fill);
+   ulong pos = g_exec.Open(dir, g_lot, sl, tp, InpTradeComment + ":L" + IntegerToString(level), err, fill);
    if(pos == 0)
      {
       g_block = "order rejected: " + err;
       Msg("Order failed: " + err, CLR_RED);
       return false;
      }
-   // SL / TP exactly InpPosLossCut / InpPosTP from the REAL fill price (the order was sent with
+   // SL / TP exactly g_posCut / g_posTP from the REAL fill price (the order was sent with
    // distances from the requested price; slippage would make the loss bigger than the win)
    if(PositionSelectByTicket(pos))
      {
@@ -531,9 +576,9 @@ bool OpenLevel(const int dir)
    g_lastLevel  = fill;
    SaveGrid();
    g_trades++;
-   JournalOpen((long)pos, dir, "GRID", "level " + IntegerToString(level), InpLot, fill, tk.ask - tk.bid, sl, tp, 0,
-               InpPosLossCut, 0, 0, "");
-   Msg(StringFormat("%s level %d/%d at %s", dir > 0 ? "BUY" : "SELL", level, InpMaxLevels,
+   JournalOpen((long)pos, dir, "GRID", "level " + IntegerToString(level), g_lot, fill, tk.ask - tk.bid, sl, tp, 0,
+               g_posCut, 0, 0, "");
+   Msg(StringFormat("%s level %d/%d at %s", dir > 0 ? "BUY" : "SELL", level, g_maxLevels,
                     DoubleToString(fill, _Digits)), CLR_BLUE);
    return true;
   }
@@ -886,7 +931,8 @@ void BuildPanel()
    MkRect("bg",     0, 0, PANEL_W, PANEL_H, CLR_BG, CLR_BORDER);
    MkRect("header", 0, 0, PANEL_W, 36, CLR_HEADER, CLR_BORDER);
    MkLabel("title", 14, 9, "XAU SCALPER", CLR_TEXT, 12, "Arial Bold");
-   MkLabel("mode", 150, 12, "CONTROLLED GRID", CLR_BLUE, 8, "Arial Bold");
+   MkLabel("mode", 150, 12, g_market == MARKET_BTC ? "CONTROLLED GRID - BITCOIN" : "CONTROLLED GRID - GOLD",
+           CLR_BLUE, 8, "Arial Bold");
    MkRect("pill", PANEL_W - 118, 8, 106, 20, CLR_GREY, CLR_GREY);
    MkLabel("pill_t", PANEL_W - 65, 18, "STOPPED", clrWhite, 8, "Arial Bold", ANCHOR_CENTER);
    MkButton("b_min", PANEL_W - 146, 8, 22, 20, "-", CLR_GREY, clrWhite, 10);
@@ -972,9 +1018,9 @@ void UpdatePanel()
    SetText("sig1", "Daily trend: " + g_filterText, g_filter > 0 ? CLR_GREEN : (g_filter < 0 ? CLR_RED : CLR_AMBER));
    if(g_gridDir != 0)
       SetText("sig2", StringFormat("%s grid: level %d/%d   next %s   basket +%.0f / -%.0f", g_gridDir > 0 ? "BUY" : "SELL",
-                                   g_gridLevels, InpMaxLevels, g_gridLevels < InpMaxLevels
-                                   ? DoubleToString(g_lastLevel - g_gridDir * InpSpacing, 2) : "none",
-                                   InpBasketTP, InpBasketStop), CLR_MUTED);
+                                   g_gridLevels, g_maxLevels, g_gridLevels < g_maxLevels
+                                   ? DoubleToString(g_lastLevel - g_gridDir * g_spacing, 2) : "none",
+                                   g_basketTP, g_basketStop), CLR_MUTED);
    else
       SetText("sig2", StringFormat("Grids %d   positions %d   won %d   lost %d   daily limit %s", g_grids, g_trades,
                                    g_wins, g_losses, InpDailyLossPct > 0 ? DoubleToString(InpDailyLossPct, 1) + "%" : "off"),
