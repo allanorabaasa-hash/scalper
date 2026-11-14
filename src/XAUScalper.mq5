@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                                 XAUScalper.mq5   |
-//|   Market-structure trader for XAUUSD (no indicators), with panel  |
+//|   Market-structure trader for gold and bitcoin (no indicators)    |
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "14.00"
+#property version   "14.10"
 #property description "Market structure only (no indicators): H1 swing structure gives the side, an M15 pullback"
 #property description "and break of structure gives the entry. Batches of 5 x 0.01; +5 after a winning batch, back to 5 after a loss."
 
@@ -22,7 +22,8 @@ input int             InpSwingBars          = 3;             // Swing point = hi
 input double          InpRewardR            = 2.0;           // Take profit at this many times the stop distance
 input double          InpBreakevenR         = 1.0;           // Move the stop to entry after this many R in profit (0 = off)
 input double          InpMinStopPct         = 0.03;          // Skip if the stop is closer than this % of price (gold ~$1.2)
-input double          InpMaxStopPct         = 0.40;          // Skip if the stop is further than this % of price (gold ~$16)
+input double          InpMaxStopPct         = 0.40;          // Gold: skip if the stop is further than this % of price (~$16)
+input double          InpMaxStopPctBtc      = 0.80;          // Bitcoin: skip if the stop is further than this % of price (~$540)
 input double          InpMaxSpreadOfStop    = 25;            // Skip if the spread is more than this % of the stop distance
 
 input group "Batches"
@@ -45,7 +46,7 @@ input bool            InpAutoStart          = true;          // Start/resume aut
 
 input group "General"
 input long            InpMagic              = 20261114;      // Magic number (unique per EA)
-input string          InpTradeComment       = "XAUMS";       // Order comment
+input string          InpTradeComment       = "Scalper";     // Order comment
 input int             InpSlippagePoints     = 30;            // Max slippage (points)
 input bool            InpJournal            = true;          // Trade journal (Common/Files/XAUScalper_trades.csv)
 input int             InpPanelX             = 10;            // Panel X offset
@@ -130,6 +131,9 @@ string ManualStopKey() { return StateKey() + "_manualstop_" + _Symbol; }
 bool   ManualStop()    { return GlobalVariableCheck(ManualStopKey()); }
 string BatchKey()      { return StateKey() + "_batch_" + _Symbol; }
 string TFName(const ENUM_TIMEFRAMES tf) { return StringSubstr(EnumToString(tf), 7); }
+bool   IsBtc()         { return StringFind(_Symbol, "BTC") >= 0; }
+// Bitcoin swings are about twice as wide as gold's in % terms
+double MaxStopPct()    { return IsBtc() ? InpMaxStopPctBtc : InpMaxStopPct; }
 
 bool IsRealAccount()
   {
@@ -510,7 +514,7 @@ bool OpenBatch(const int dir, const double stopPrice, const string why)
       g_lastSignal = StringFormat("%s skipped: stop too close (%.2f)", why, dist);
       return false;
      }
-   if(dist > entry * InpMaxStopPct / 100.0)
+   if(dist > entry * MaxStopPct() / 100.0)
      {
       g_lastSignal = StringFormat("%s skipped: stop too far (%.2f)", why, dist);
       return false;
@@ -1114,7 +1118,7 @@ void BuildPanel()
   {
    MkRect("bg",     0, 0, PANEL_W, PANEL_H, CLR_BG, CLR_BORDER);
    MkRect("header", 0, 0, PANEL_W, 36, CLR_HEADER, CLR_BORDER);
-   MkLabel("title", 14, 9, "XAU SCALPER", CLR_TEXT, 12, "Arial Bold");
+   MkLabel("title", 14, 9, IsBtc() ? "BTC SCALPER" : "XAU SCALPER", CLR_TEXT, 12, "Arial Bold");
    MkLabel("mode", 150, 12, "MARKET STRUCTURE (" + TFName(InpBiasTF) + " / " + TFName(InpEntryTF) + ")", CLR_BLUE, 8,
            "Arial Bold");
    MkRect("pill", PANEL_W - 118, 8, 106, 20, CLR_GREY, CLR_GREY);

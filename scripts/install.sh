@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copies the EA, its include files and the unit-test script into every MT5
+# Copies the EA, its include files and the Tester presets into every MT5
 # install inside the Wine prefix, then tries to compile them.
 # Usage:  ./scripts/install.sh
 set -euo pipefail
@@ -11,7 +11,6 @@ export WINEDEBUG=-all
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EA_SRC="$REPO_DIR/src/XAUScalper.mq5"
 INC_SRC="$REPO_DIR/src/Include/XAUScalper"
-TEST_DIR="$REPO_DIR/tests"
 
 [ -x "$WINE" ]    || { echo "Wine not found at $WINE (set WINE=/path/to/wine)"; exit 1; }
 [ -f "$EA_SRC" ]  || { echo "Source not found: $EA_SRC"; exit 1; }
@@ -40,22 +39,26 @@ compile() {   # $1 = .mq5 file, $2 = MQL5 folder
   fi
 }
 
+# Presets of earlier versions (removed from the repo) that may still sit in MT5's Tester folder
+OLD_PRESETS=(auto auto_strict_minlot all7_testing s1_pullback s2_breakout s3_meanrev s4_sweep s5_momentum
+  s6_fvg s7_srbounce s8_trend core_A_baseline core_B_no_momentum_exit core_C_no_time_exit core_D_no_early_exits
+  pb_E_no_htf pb_F_htf_h1 grid_user ema_trend_M1 ema_trend_M5 ema_trend_H4 basket grid grid_cut2.5 grid_cut3
+  grid_cut4 grid_cut5 trend btc structure)
+
 for mql5 in "${MQL5_DIRS[@]}"; do
   echo "==> $mql5"
-  mkdir -p "$mql5/Include/XAUScalper" "$mql5/Scripts/XAUScalper"
-  # remove files of the old strategies (v6 and earlier)
-  rm -f "$mql5/Include/XAUScalper/"{Strat,Strategy,Regime,Levels,Filters,Common}*.mqh \
-        "$mql5/Scripts/XAUScalper/StrategyTests."* 2>/dev/null || true
+  # clean out everything from earlier versions
+  rm -rf "$mql5/Include/XAUScalper" "$mql5/Scripts/XAUScalper"
+  for p in "${OLD_PRESETS[@]}"; do rm -f "$mql5/Profiles/Tester/$p.set"; done
+  # install the current bot
+  mkdir -p "$mql5/Include/XAUScalper" "$mql5/Profiles/Tester"
   cp "$INC_SRC"/*.mqh "$mql5/Include/XAUScalper/"
   cp "$EA_SRC" "$mql5/Experts/XAUScalper.mq5"
-  cp "$TEST_DIR"/*.mq5 "$REPO_DIR"/src/Scripts/*.mq5 "$mql5/Scripts/XAUScalper/"
-  mkdir -p "$mql5/Profiles/Tester"
-  cp "$REPO_DIR"/tools/presets/*.set "$mql5/Profiles/Tester/" 2>/dev/null || true
-  echo "    files copied"
+  cp "$REPO_DIR"/tools/presets/*.set "$mql5/Profiles/Tester/"
+  echo "    files copied (old versions' files removed)"
   compile "$mql5/Experts/XAUScalper.mq5" "$mql5"
-  for t in "$mql5"/Scripts/XAUScalper/*.mq5; do compile "$t" "$mql5"; done
 done
 
 echo
-echo "Next: in MetaEditor compile (F7) Experts/XAUScalper.mq5 and Scripts/XAUScalper/ExportBars.mq5,"
-echo "then re-attach XAUScalper to ONE XAUUSD M1 chart."
+echo "Next: in MetaEditor compile (F7) Experts/XAUScalper.mq5, then attach XAUScalper to ONE chart per"
+echo "market (XAUUSDm and/or BTCUSDm). Tester presets: structure_gold.set, structure_btc.set."
