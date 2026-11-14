@@ -1,0 +1,15 @@
+; XAUScalper v14.00 market structure (defaults)
+InpBiasTF=16385
+InpEntryTF=15
+InpSwingBars=3
+InpRewardR=2.0
+InpBreakevenR=1.0
+InpMinStopPct=0.03
+InpMaxStopPct=0.40
+InpMaxSpreadOfStop=25
+InpLot=0.01
+InpBatchStart=5
+InpBatchStep=5
+InpBatchMax=20
+InpMaxBatchRiskPct=15
+InpNews=true

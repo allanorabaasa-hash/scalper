@@ -122,3 +122,4 @@ trades; see `docs/PHASE_B.md`).
 | 2026-11-13 | - | v12.00 | - | - | - | - | - | - | Controlled Grid with early profits / loss cuts (user rules, unchanged). Not yet tested on real data. |
 | 2026-11-13 | I | v12.00 demo, 24 positions (15:19-20:30) | 2026-11-13 | cut -5 | 24 | 0.93 | 13 won +50.05, 11 lost -53.92 | - | Net -3.87. Losses larger than wins: v12.10 default cut -3; presets grid_cut5/4/3/2.5 to compare. |
 | 2026-11-14 | I | v12.20 on BTCUSDm overnight (gold settings) | 2026-11-14 | gold $ settings on BTC | ~35 | - | day +24.95 (+8%) | - | All 8 levels opened at once (spread > spacing); closed by basket +12. v13.00 adds Market input with scaled Bitcoin settings. |
+| 2026-11-14 | - | v14.00 | - | - | - | - | - | - | All previous strategies removed. Market structure (H1 side, M15 pullback + BOS), batches 5/+5, news protect + breakout. Not yet tested. |

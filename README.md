@@ -1,87 +1,67 @@
 # scalper
 
-MetaTrader 5 Expert Advisor for XAUUSD with an on-chart control panel, plus a Python backtest
-with the same rules. Runs on Kali Linux through a portable Wine staging build. Previous
-strategies are in git history only.
+MetaTrader 5 Expert Advisor for XAUUSD that trades **market structure only, no indicators**,
+with an on-chart control panel. Runs on Kali Linux through a portable Wine staging build.
+Previous strategies are in git history only.
 
-## Strategy (v13.00): Controlled Grid for Gold or Bitcoin
+## Strategy (v14.00)
 
-Input **Market**: *Auto* (from the chart symbol), *Gold* or *Bitcoin*. Each market has its own
-settings. Attach the bot to the chart of the market you want; attach it to both charts to run
-both (each trades only when its own daily trend is valid; they share the account's margin and
-the daily loss limit; STOP on one chart does not stop the other).
+**Side (H1 structure).** Swing points: a candle whose high (low) is above (below) the 3 candles
+on each side. Higher highs + higher lows, and price above the last higher low = **buy side**.
+Lower highs + lower lows, and price below the last lower high = **sell side**. Anything else =
+range / unclear: no trade.
 
-| Rule | Gold (XAUUSDm) | Bitcoin (BTCUSDm) |
-|---|---|---|
-| Direction | Daily EMA 21 vs EMA 55 of that symbol; no new grid if flat or crossing | same |
-| Lot per level (fixed) | 0.01 | 0.02 |
-| Grid spacing | $3 move | $150 move |
-| Max levels | 8 | 8 |
-| Each position: take profit | +$4 (a $4 move) | +$4 (a $200 move) |
-| Each position: loss cut | -$3 (a $3 move) | -$3 (a $150 move) |
-| Basket take profit / hard stop | +$12 / -$18 | +$12 / -$18 |
-| Daily loss limit | 4% | 4% (shared) |
+**Entry (M15 pullback + break of structure).** On the buy side the bot waits for a pullback
+(M15 makes a lower high). The first M15 close back above that lower high is the entry: the
+pullback is over and the trend resumes. Sell side mirrored.
 
-Bitcoin moves about 50x more than gold in dollars, so the Bitcoin settings are scaled to its
-size: the money per win and per loss is the same as on gold. With 0.01 lot and the gold
-settings, BTC's $6 spread was larger than the $3 spacing and all 8 levels opened at once. A
-guard now blocks new positions whenever the spread is more than half the spacing.
+**Stop and target.** Stop below the pullback's lowest low (above the highest high for sells)
+plus spread and a small buffer: where the idea is wrong. Target 2 x the stop distance (2R).
+At +1R every position's stop moves to entry (breakeven). Trades are skipped when the stop is
+closer than 0.03% or wider than 0.40% of price (gold: about $1.2 / $16), or the spread is more
+than 25% of the stop.
 
-Every position carries its own TP and loss cut on the broker's server, so they work even when
-MT5 or the internet is down. The basket rules need MT5 running.
+**Batches.** Each entry opens a batch of 0.01 positions with the same stop and target.
+First batch **5**. Batch closed in profit -> next batch **+5** (10, 15, 20 max).
+Batch closed at a loss -> back to **5**. One batch at a time. Safety cap: a batch never risks
+more than **15%** of the balance at its stop (fewer positions if needed; input, 0 = off).
 
-Notes on how the rules interact (no rule changed):
-- Each position is cut early, so the floating loss rarely reaches -$18; but cut losses add up:
-  a grid that uses all 8 levels against the trend can lose 8 x $3 = **$24** (8 x $5 = $40 at a -$5 cut).
-- With +$4 wins and -$3 cuts, positions need to win more than 3 / 7 = **43%** (56% at -$5).
-- Compare cut sizes in the Strategy Tester with `grid_cut5.set`, `grid_cut4.set`, `grid_cut3.set`, `grid_cut2.5.set`.
-- A position at +$4 closes before the basket can reach +$12, so the basket TP fires rarely.
+**News (high-impact USD, MT5 calendar).**
+- 15 min before a release: no new entries; positions in profit move their stop to breakeven.
+- After the release (30 min): the range of the 15 minutes before it is the box; the first M1
+  close outside the box opens a batch in that direction, stop at the other side of the box.
+- The calendar works only live, not in the Strategy Tester.
 
-## MT5 setup (Kali + Wine)
+No daily loss limit. Emergency close-all below 100% margin level. Auto-start whenever MT5 is
+connected (STOP is remembered per chart). Refuses new trades on a REAL account unless allowed.
+
+## Setup
 
 ```bash
 cd ~/scalper && git pull
 ./scripts/install.sh
 ```
 
-MetaEditor (F4), F7 on `Experts/XAUScalper.mq5` and `Scripts/XAUScalper/ExportBars.mq5`.
-Attach **XAUScalper** to one XAUUSDm chart (any timeframe), tick *Allow Algo Trading*, turn on
-**Algo Trading**. Strategy Tester presets: `tools/presets/grid.set` (gold), `tools/presets/btc.set` (bitcoin).
+MetaEditor (F4), F7 on `Experts/XAUScalper.mq5`. Attach **XAUScalper** to one XAUUSDm chart
+(any timeframe), tick *Allow Algo Trading*, turn on **Algo Trading**.
+On Kali, `./scripts/install-autostart.sh` starts MT5 at login once the internet is up.
 
-## Python backtest
-
-1. In MT5 run **ExportBars** on the XAUUSDm chart and on the BTCUSDm chart (timeframe M1). It writes `XAUUSDm_M1.csv`
-   and `XAUUSDm_D1.csv` to Common/Files.
-2. ```bash
-   COMMON=$(find ~/.mt5/drive_c/users -type d -path '*MetaQuotes/Terminal/Common/Files' | head -1)
-   python3 tools/backtest_grid.py --bars "$COMMON/XAUUSDm_M1.csv" --daily "$COMMON/XAUUSDm_D1.csv"
-   python3 tools/backtest_grid.py ... --daily-loss 0 --from 2026-08-01 --grids-out grids.csv
-   python3 tools/backtest_grid.py --market btc --bars "$COMMON/BTCUSDm_M1.csv" --daily "$COMMON/BTCUSDm_D1.csv"
-   python3 -m unittest tools/test_backtest_grid.py
-   ```
-
-Inside a candle the backtest assumes the worst extreme comes first (conservative), fires every
-trigger in the order the price reaches it, and charges the spread (`--spread`, default 0.25).
+**Test first:** Strategy Tester, XAUScalper, XAUUSDm, M1, custom period, *Every tick based on
+real ticks*, deposit 500, preset `tools/presets/structure.set`.
 
 ## Panel
 
-START, STOP (no new grids or levels; open positions keep their TP / loss cut), CLOSE ALL,
-EMERGENCY. Shows balance, equity, day P/L, grid floating P/L, daily trend, grid level and the
-next level price, positions with their TP / loss-cut prices, and why the bot is waiting.
-
-## Auto-start
-
-The EA starts by itself whenever MT5 is connected; STOP or EMERGENCY is remembered until START.
-On Kali, `./scripts/install-autostart.sh` starts MT5 at login once the internet is up.
+START, STOP (no new batches; open positions keep their SL / TP), CLOSE ALL, EMERGENCY. Shows
+balance, equity, day and open P/L, next batch size, next high-impact news, the H1 structure,
+the M15 swing high/low, the last batch result, positions with SL / TP, and why it is waiting.
 
 ## Layout
 
 ```
-src/XAUScalper.mq5                 EA: grid engine, panel, journal hooks
+src/XAUScalper.mq5                 EA: structure, batches, news, panel, journal hooks
 src/Include/XAUScalper/*.mqh       risk manager (day stats, emergency), execution, journal
-src/Scripts/ExportBars.mq5         exports bars for the Python backtest
-tools/backtest_grid.py             Python backtest (+ tests)
+src/Scripts/ExportBars.mq5         exports bars to CSV
 tools/analyze_trades.py            report from the EA journal (+ tests)
-tools/presets/grid.set, btc.set    Strategy Tester presets
+tools/presets/structure.set        Strategy Tester preset
 scripts/                           install, start/stop MT5, auto-start
 ```

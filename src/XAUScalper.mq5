@@ -1,62 +1,51 @@
 //+------------------------------------------------------------------+
 //|                                                 XAUScalper.mq5   |
-//|        Controlled Directional Grid for XAUUSD, with panel         |
+//|   Market-structure trader for XAUUSD (no indicators), with panel  |
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "13.00"
-#property description "Controlled Grid for Gold or Bitcoin (input Market): daily EMA 21/55 direction, max 8 levels."
-#property description "Each position: TP +$4 / loss cut -$3 (on the server). Basket: TP +$12, stop -$18. Daily limit 4%."
+#property version   "14.00"
+#property description "Market structure only (no indicators): H1 swing structure gives the side, an M15 pullback"
+#property description "and break of structure gives the entry. Batches of 5 x 0.01; +5 after a winning batch, back to 5 after a loss."
 
 #include <XAUScalper\RiskManager.mqh>
 #include <XAUScalper\Execution.mqh>
 #include <XAUScalper\Journal.mqh>
 
 //==================================================================
-//  INPUTS (defaults = the strategy rules)
+//  INPUTS
 //==================================================================
-input group "Direction filter (Daily)"
-input int             InpEmaFast            = 21;            // Daily EMA fast
-input int             InpEmaSlow            = 55;            // Daily EMA slow
-input double          InpFlatGapAtr         = 0.10;          // "Flat": EMA gap below this x ATR(D1,14) -> no new grid
+input group "Market structure"
+input ENUM_TIMEFRAMES InpBiasTF             = PERIOD_H1;     // Structure timeframe (side: HH/HL = buy, LH/LL = sell)
+input ENUM_TIMEFRAMES InpEntryTF            = PERIOD_M15;    // Entry timeframe (pullback + break of structure)
+input int             InpSwingBars          = 3;             // Swing point = higher/lower than this many candles each side
+input double          InpRewardR            = 2.0;           // Take profit at this many times the stop distance
+input double          InpBreakevenR         = 1.0;           // Move the stop to entry after this many R in profit (0 = off)
+input double          InpMinStopPct         = 0.03;          // Skip if the stop is closer than this % of price (gold ~$1.2)
+input double          InpMaxStopPct         = 0.40;          // Skip if the stop is further than this % of price (gold ~$16)
+input double          InpMaxSpreadOfStop    = 25;            // Skip if the spread is more than this % of the stop distance
 
-enum ENUM_MARKET
-  {
-   MARKET_AUTO = 0,   // Auto (from the chart symbol)
-   MARKET_GOLD = 1,   // Gold (XAUUSD)
-   MARKET_BTC  = 2    // Bitcoin (BTCUSD)
-  };
+input group "Batches"
+input double          InpLot                = 0.01;          // Lot per position (fixed)
+input int             InpBatchStart         = 5;             // Positions in the first batch (and after a losing batch)
+input int             InpBatchStep          = 5;             // Add this many positions after a winning batch
+input int             InpBatchMax           = 20;            // Never more than this many positions in one batch
+input double          InpMaxBatchRiskPct    = 15;            // Batch stop-loss risk at most this % of balance (fewer positions if needed; 0 = off)
 
-input group "Market"
-input ENUM_MARKET     InpMarket             = MARKET_AUTO;   // Which settings to use (attach to that symbol's chart)
+input group "News (MT5 economic calendar, live only)"
+input bool            InpNews               = true;          // React to high-impact USD news
+input int             InpNewsBeforeMin      = 15;            // Before the release: no new entries, winners to breakeven
+input int             InpNewsRangeMin       = 15;            // Breakout range = high/low of the last N minutes before release
+input int             InpNewsAfterMin       = 30;            // After the release: trade a breakout of that range for N minutes
 
-input group "Gold settings (XAUUSD)"
-input double          InpG_Lot              = 0.01;          // Lot on every level (fixed)
-input double          InpG_Spacing          = 3.00;          // Grid spacing (price move, USD)
-input int             InpG_MaxLevels        = 8;             // Maximum levels per grid
-input double          InpG_PosTP            = 4.0;           // Each position: take profit at +USD
-input double          InpG_PosLossCut       = 3.0;           // Each position: loss cut at -USD
-input double          InpG_BasketTP         = 12.0;          // Basket take profit (+USD)
-input double          InpG_BasketStop       = 18.0;          // Hard basket stop (-USD)
-
-input group "Bitcoin settings (BTCUSD), scaled to BTC's ~50x larger moves"
-input double          InpB_Lot              = 0.02;          // Lot on every level (fixed)
-input double          InpB_Spacing          = 150.0;         // Grid spacing (price move, USD)
-input int             InpB_MaxLevels        = 8;             // Maximum levels per grid
-input double          InpB_PosTP            = 4.0;           // Each position: take profit at +USD (0.02 lot: a $200 move)
-input double          InpB_PosLossCut       = 3.0;           // Each position: loss cut at -USD (0.02 lot: a $150 move)
-input double          InpB_BasketTP         = 12.0;          // Basket take profit (+USD)
-input double          InpB_BasketStop       = 18.0;          // Hard basket stop (-USD)
-
-input group "Risk controls"
-input double          InpDailyLossPct       = 4.0;           // No new grid for the rest of the day after this % loss (0 = off)
+input group "Account safety"
 input double          InpEmergencyMarginLevel = 100;         // Emergency: close all below this margin level % (0 = off)
 input bool            InpAllowReal          = false;         // Allow trading on a REAL account
 input bool            InpAutoStart          = true;          // Start/resume automatically whenever connected (STOP is remembered)
 
 input group "General"
 input long            InpMagic              = 20261114;      // Magic number (unique per EA)
-input string          InpTradeComment       = "XAUGrid";     // Order comment
+input string          InpTradeComment       = "XAUMS";       // Order comment
 input int             InpSlippagePoints     = 30;            // Max slippage (points)
 input bool            InpJournal            = true;          // Trade journal (Common/Files/XAUScalper_trades.csv)
 input int             InpPanelX             = 10;            // Panel X offset
@@ -73,6 +62,7 @@ enum ENUM_BOT_STATE
 
 #define MAX_ROWS 6
 #define PREFIX   "XS_"
+#define LOOKBACK 300
 
 CRiskManager   g_risk;
 CExecution     g_exec;
@@ -84,22 +74,30 @@ color          g_lastMsgColor = clrSilver;
 ulong          g_rowTicket[MAX_ROWS];
 bool           g_collapsed    = false;
 
-int            g_hDFast = INVALID_HANDLE, g_hDSlow = INVALID_HANDLE, g_hDAtr = INVALID_HANDLE;
-int            g_filter       = 0;    // +1 buy grids, -1 sell grids, 0 none
-string         g_filterText   = "-";
-string         g_block        = "";   // why no new grid / level right now
-datetime       g_lastTry      = 0;
-int            g_trades = 0, g_wins = 0, g_losses = 0, g_grids = 0;
-int            g_gridDir   = 0;       // active grid: direction, levels opened, price of the last level
-int            g_gridLevels = 0;      // (persisted in global variables: survives restarts)
-double         g_lastLevel = 0;
+int            g_bias         = 0;      // +1 H1 up structure, -1 down, 0 range / unclear
+string         g_biasText     = "-";
+double         g_eSH = 0, g_eSL = 0;    // latest M15 swing high / low (panel)
+string         g_block        = "";     // why no entry right now
+string         g_lastSignal   = "none yet";
+datetime       g_lastEntryBar = 0;
+int            g_wins = 0, g_losses = 0;
 
-// active settings (from the Gold or Bitcoin inputs)
-int            g_market      = MARKET_GOLD;
-double         g_lot = 0.01, g_spacing = 3, g_posTP = 4, g_posCut = 3, g_basketTP = 12, g_basketStop = 18;
-int            g_maxLevels   = 8;
+// batch state (persisted in global variables)
+int            g_batchSize    = 5;      // size of the NEXT batch
+int            g_batchId      = 0;
+bool           g_batchOpen    = false;
+datetime       g_batchStart   = 0;
+double         g_lastBatchPL  = 0;
 
-long           g_reasonPos[];         // positions closed by the bot, and why (journal)
+// news state
+datetime       g_newsTime     = 0;
+string         g_newsName     = "";
+string         g_newsStatus   = "off";
+datetime       g_newsChecked  = 0;
+datetime       g_newsTraded   = 0;      // release already traded
+double         g_newsHi = 0, g_newsLo = 0;
+
+long           g_reasonPos[];
 string         g_reasonText[];
 
 //--- Panel colours
@@ -128,15 +126,16 @@ string StateKey()
   {
    return "XS_state_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + IntegerToString(InpMagic);
   }
-string ManualStopKey() { return StateKey() + "_manualstop_" + _Symbol; }   // per chart: STOP on gold does not stop BTC
+string ManualStopKey() { return StateKey() + "_manualstop_" + _Symbol; }
 bool   ManualStop()    { return GlobalVariableCheck(ManualStopKey()); }
+string BatchKey()      { return StateKey() + "_batch_" + _Symbol; }
+string TFName(const ENUM_TIMEFRAMES tf) { return StringSubstr(EnumToString(tf), 7); }
 
 bool IsRealAccount()
   {
    return !MQLInfoInteger(MQL_TESTER) && AccountInfoInteger(ACCOUNT_TRADE_MODE) == ACCOUNT_TRADE_MODE_REAL;
   }
 
-// Call after PositionGetTicket / PositionSelect.
 bool IsOurs()
   {
    return PositionGetString(POSITION_SYMBOL) == _Symbol && PositionGetInteger(POSITION_MAGIC) == InpMagic;
@@ -151,30 +150,13 @@ int CountOurs()
    return n;
   }
 
-// The active grid, rebuilt from the open positions (survives restarts).
-struct GridInfo
+double OpenPL()
   {
-   int    levels;     // open positions
-   int    dir;        // +1 buy grid, -1 sell grid (0 = none)
-   double lastLevel;  // lowest buy / highest sell open price
-   double pl;         // floating profit + swap
-  };
-
-void ReadGrid(GridInfo &g)
-  {
-   g.levels = 0;  g.dir = 0;  g.lastLevel = 0;  g.pl = 0;
+   double pl = 0;
    for(int i = PositionsTotal() - 1; i >= 0; i--)
-     {
-      if(PositionGetTicket(i) == 0 || !IsOurs())
-         continue;
-      int    d = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 1 : -1;
-      double p = PositionGetDouble(POSITION_PRICE_OPEN);
-      g.pl += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
-      if(g.levels == 0 || (d > 0 && p < g.lastLevel) || (d < 0 && p > g.lastLevel))
-         g.lastLevel = p;
-      g.dir = d;
-      g.levels++;
-     }
+      if(PositionGetTicket(i) != 0 && IsOurs())
+         pl += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+   return pl;
   }
 
 void NoteCloseReason(const ulong ticket, const string why)
@@ -205,62 +187,424 @@ string TakeCloseReason(const long position)
    return "";
   }
 
-bool Value(const int handle, const int shift, double &v)
+//==================================================================
+//  MARKET STRUCTURE (closed candles only, no indicators)
+//==================================================================
+// Latest two swing highs and lows. A swing high is a candle whose high is above the highs of
+// InpSwingBars candles on each side (lows mirrored). Shifts count back from the last candle.
+struct Swings
   {
-   double b[];
-   if(CopyBuffer(handle, 0, shift, 1, b) != 1)
+   int    nh, nl;
+   double h1, h2, l1, l2;   // h1 / l1 = most recent
+   int    sh1, sh2, sl1, sl2;
+  };
+
+bool FindSwings(const ENUM_TIMEFRAMES tf, Swings &w, MqlRates &r[])
+  {
+   w.nh = 0;  w.nl = 0;  w.h1 = 0;  w.h2 = 0;  w.l1 = 0;  w.l2 = 0;  w.sh1 = 0;  w.sh2 = 0;  w.sl1 = 0;  w.sl2 = 0;
+   ArraySetAsSeries(r, true);
+   int n = CopyRates(_Symbol, tf, 0, LOOKBACK, r);
+   int k = InpSwingBars;
+   if(n < 2 * k + 10)
       return false;
-   v = b[0];
-   return v != EMPTY_VALUE;
+   for(int s = k + 1; s < n - k && (w.nh < 2 || w.nl < 2); s++)
+     {
+      bool hi = true, lo = true;
+      for(int j = 1; j <= k && (hi || lo); j++)
+        {
+         if(r[s].high <= r[s - j].high || r[s].high <= r[s + j].high)
+            hi = false;
+         if(r[s].low >= r[s - j].low || r[s].low >= r[s + j].low)
+            lo = false;
+        }
+      if(hi && w.nh < 2)
+        {
+         if(w.nh == 0) { w.h1 = r[s].high;  w.sh1 = s; }
+         else          { w.h2 = r[s].high;  w.sh2 = s; }
+         w.nh++;
+        }
+      if(lo && w.nl < 2)
+        {
+         if(w.nl == 0) { w.l1 = r[s].low;  w.sl1 = s; }
+         else          { w.l2 = r[s].low;  w.sl2 = s; }
+         w.nl++;
+        }
+     }
+   return w.nh == 2 && w.nl == 2;
   }
 
-// Daily direction filter from the last two COMPLETED daily candles.
-void UpdateFilter()
+// H1 side: higher highs + higher lows and price above the last higher low = up (mirror = down).
+void UpdateBias()
   {
-   g_filter = 0;
-   double f1, s1, f2, s2, atr;
-   if(iBars(_Symbol, PERIOD_D1) < InpEmaSlow + 3 || !Value(g_hDFast, 1, f1) || !Value(g_hDSlow, 1, s1)
-      || !Value(g_hDFast, 2, f2) || !Value(g_hDSlow, 2, s2) || !Value(g_hDAtr, 1, atr))
+   Swings w;
+   MqlRates r[];
+   g_bias = 0;
+   if(!FindSwings(InpBiasTF, w, r))
      {
-      g_filterText = "waiting for daily data";
+      g_biasText = "waiting for " + TFName(InpBiasTF) + " data";
       return;
      }
-   if((f1 - s1) * (f2 - s2) <= 0)
+   double c = r[1].close;
+   if(w.h1 > w.h2 && w.l1 > w.l2 && c > w.l1)
      {
-      g_filterText = "EMAs crossing: no new grid";
-      return;
+      g_bias = 1;
+      g_biasText = "UP (higher highs, higher lows)";
      }
-   if(MathAbs(f1 - s1) < InpFlatGapAtr * atr)
+   else if(w.h1 < w.h2 && w.l1 < w.l2 && c < w.h1)
      {
-      g_filterText = StringFormat("EMAs flat (gap %.2f): no new grid", MathAbs(f1 - s1));
-      return;
+      g_bias = -1;
+      g_biasText = "DOWN (lower highs, lower lows)";
      }
-   g_filter = (f1 > s1) ? 1 : -1;
-   g_filterText = g_filter > 0 ? "UP: buy grids only" : "DOWN: sell grids only";
+   else
+      g_biasText = "RANGE / unclear: no trade";
+  }
+
+// Entry: in an up structure, the M15 pullback makes a lower high; the first M15 close back
+// above that lower high (break of structure) is the buy. Stop below the pullback's low.
+// Mirrored for sells. Returns the direction (0 = none) and the stop price.
+int EntrySignal(double &stop, string &why)
+  {
+   Swings w;
+   MqlRates r[];
+   stop = 0;
+   why  = "";
+   if(!FindSwings(InpEntryTF, w, r))
+     {
+      why = "waiting for " + TFName(InpEntryTF) + " data";
+      return 0;
+     }
+   g_eSH = w.h1;  g_eSL = w.l1;
+   MqlTick tk;
+   SymbolInfoTick(_Symbol, tk);
+   double buffer = (tk.ask - tk.bid) + r[1].close * 0.0002;
+   if(g_bias > 0)
+     {
+      if(!(w.h1 < w.h2))
+        {
+         why = "up structure: waiting for a pullback (lower high on " + TFName(InpEntryTF) + ")";
+         return 0;
+        }
+      if(!(r[1].close > w.h1 && r[2].close <= w.h1))
+        {
+         why = StringFormat("pullback: waiting for a close above %s", DoubleToString(w.h1, _Digits));
+         return 0;
+        }
+      double low = r[1].low;
+      for(int s = 2; s <= w.sh1; s++)
+         low = MathMin(low, r[s].low);
+      stop = low - buffer;
+      return 1;
+     }
+   if(g_bias < 0)
+     {
+      if(!(w.l1 > w.l2))
+        {
+         why = "down structure: waiting for a pullback (higher low on " + TFName(InpEntryTF) + ")";
+         return 0;
+        }
+      if(!(r[1].close < w.l1 && r[2].close >= w.l1))
+        {
+         why = StringFormat("pullback: waiting for a close below %s", DoubleToString(w.l1, _Digits));
+         return 0;
+        }
+      double high = r[1].high;
+      for(int s = 2; s <= w.sl1; s++)
+         high = MathMax(high, r[s].high);
+      stop = high + buffer;
+      return -1;
+     }
+   why = g_biasText;
+   return 0;
   }
 
 //==================================================================
-//  DAILY LOSS LIMIT (server day, closed + floating)
+//  NEWS (high-impact USD events from the MT5 calendar)
 //==================================================================
-string DayKey() { return StateKey() + "_day"; }
-
-double DayStartBalance()
+void UpdateNews()
   {
-   datetime today = (datetime)(TimeCurrent() / 86400 * 86400);
-   if(!GlobalVariableCheck(DayKey()) || (datetime)(long)GlobalVariableGet(DayKey()) != today)
+   if(!InpNews)
      {
-      GlobalVariableSet(DayKey(), (double)today);
-      GlobalVariableSet(DayKey() + "_bal", AccountInfoDouble(ACCOUNT_BALANCE));
+      g_newsStatus = "off";
+      return;
      }
-   return GlobalVariableGet(DayKey() + "_bal");
+   if(MQLInfoInteger(MQL_TESTER))
+     {
+      g_newsStatus = "not available in the Strategy Tester";
+      return;
+     }
+   datetime now = TimeTradeServer();
+   if(now - g_newsChecked < 60)
+      return;
+   g_newsChecked = now;
+   MqlCalendarValue v[];
+   g_newsTime = 0;
+   g_newsName = "";
+   if(!CalendarValueHistory(v, now - InpNewsAfterMin * 60, now + 24 * 3600, NULL, "USD"))
+     {
+      g_newsStatus = "calendar unavailable";
+      return;
+     }
+   for(int i = 0; i < ArraySize(v); i++)
+     {
+      MqlCalendarEvent ev;
+      if(!CalendarEventById(v[i].event_id, ev) || ev.importance != CALENDAR_IMPORTANCE_HIGH)
+         continue;
+      if(g_newsTime == 0 || v[i].time < g_newsTime)
+        {
+         g_newsTime = v[i].time;
+         g_newsName = ev.name;
+        }
+     }
+   g_newsStatus = (g_newsTime == 0) ? "no high-impact USD news in 24 h" : "";
   }
 
-double DayPL() { return AccountInfoDouble(ACCOUNT_EQUITY) - DayStartBalance(); }
-
-bool DailyLimitHit()
+// 0 = normal, 1 = before the release, 2 = breakout window after the release
+int NewsPhase()
   {
-   double start = DayStartBalance();
-   return InpDailyLossPct > 0 && start > 0 && -DayPL() >= start * InpDailyLossPct / 100.0;
+   if(!InpNews || g_newsTime == 0)
+      return 0;
+   datetime now = TimeTradeServer();
+   if(now >= g_newsTime - InpNewsBeforeMin * 60 && now < g_newsTime)
+      return 1;
+   if(now >= g_newsTime && now < g_newsTime + InpNewsAfterMin * 60)
+      return 2;
+   return 0;
+  }
+
+// Before a release: move every position that is in profit to breakeven.
+void ProtectForNews()
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(t == 0 || !IsOurs())
+         continue;
+      int    d    = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 1 : -1;
+      double open = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl   = PositionGetDouble(POSITION_SL);
+      MqlTick tk;
+      SymbolInfoTick(_Symbol, tk);
+      double px = d > 0 ? tk.bid : tk.ask;
+      if(d * (px - open) > 0 && (sl == 0 || d * (open - sl) > 0))
+        {
+         string err;
+         if(g_exec.MoveStop(t, open, err))
+            Msg("News ahead: stop moved to breakeven on #" + IntegerToString((long)t), CLR_AMBER);
+        }
+     }
+  }
+
+// After a release: break of the pre-news range. Returns direction and stop.
+int NewsSignal(double &stop)
+  {
+   stop = 0;
+   if(g_newsTraded == g_newsTime)
+      return 0;
+   if(g_newsHi <= 0)
+     {
+      MqlRates m[];
+      int n = CopyRates(_Symbol, PERIOD_M1, g_newsTime - InpNewsRangeMin * 60, g_newsTime - 1, m);
+      if(n <= 0)
+         return 0;
+      g_newsHi = m[0].high;  g_newsLo = m[0].low;
+      for(int i = 1; i < n; i++)
+        {
+         g_newsHi = MathMax(g_newsHi, m[i].high);
+         g_newsLo = MathMin(g_newsLo, m[i].low);
+        }
+     }
+   double c = iClose(_Symbol, PERIOD_M1, 1);
+   datetime t1 = iTime(_Symbol, PERIOD_M1, 1);
+   if(t1 < g_newsTime)
+      return 0;
+   MqlTick tk;
+   SymbolInfoTick(_Symbol, tk);
+   double buffer = (tk.ask - tk.bid) + c * 0.0002;
+   if(c > g_newsHi)
+     {
+      stop = g_newsLo - buffer;
+      return 1;
+     }
+   if(c < g_newsLo)
+     {
+      stop = g_newsHi + buffer;
+      return -1;
+     }
+   return 0;
+  }
+
+//==================================================================
+//  BATCHES
+//==================================================================
+void SaveBatch()
+  {
+   GlobalVariableSet(BatchKey() + "_size", g_batchSize);
+   GlobalVariableSet(BatchKey() + "_id", g_batchId);
+   GlobalVariableSet(BatchKey() + "_open", g_batchOpen ? 1 : 0);
+   GlobalVariableSet(BatchKey() + "_start", (double)g_batchStart);
+   GlobalVariableSet(BatchKey() + "_last", g_lastBatchPL);
+  }
+
+void LoadBatch()
+  {
+   g_batchSize = InpBatchStart;
+   if(MQLInfoInteger(MQL_TESTER) || !GlobalVariableCheck(BatchKey() + "_size"))
+      return;
+   g_batchSize   = (int)GlobalVariableGet(BatchKey() + "_size");
+   g_batchId     = (int)GlobalVariableGet(BatchKey() + "_id");
+   g_batchOpen   = GlobalVariableGet(BatchKey() + "_open") > 0;
+   g_batchStart  = (datetime)(long)GlobalVariableGet(BatchKey() + "_start");
+   g_lastBatchPL = GlobalVariableGet(BatchKey() + "_last");
+   g_batchSize   = MathMax(InpBatchStart, MathMin(g_batchSize, InpBatchMax));
+  }
+
+// Net result of the batch: every closing deal of this EA on this symbol since the batch opened.
+double BatchResult()
+  {
+   if(!HistorySelect(g_batchStart - 1, TimeCurrent() + 60))
+      return 0;
+   double pl = 0;
+   for(int i = 0; i < HistoryDealsTotal(); i++)
+     {
+      ulong d = HistoryDealGetTicket(i);
+      if(d == 0 || HistoryDealGetString(d, DEAL_SYMBOL) != _Symbol || HistoryDealGetInteger(d, DEAL_MAGIC) != InpMagic)
+         continue;
+      pl += HistoryDealGetDouble(d, DEAL_PROFIT) + HistoryDealGetDouble(d, DEAL_SWAP)
+            + HistoryDealGetDouble(d, DEAL_COMMISSION) + HistoryDealGetDouble(d, DEAL_FEE);
+     }
+   return pl;
+  }
+
+// A batch is finished when none of its positions is open: size up after a win, back to start after a loss.
+void CheckBatchEnd()
+  {
+   if(!g_batchOpen || CountOurs() > 0)
+      return;
+   g_lastBatchPL = BatchResult();
+   g_batchOpen = false;
+   if(g_lastBatchPL > 0)
+      g_batchSize = MathMin(g_batchSize + InpBatchStep, InpBatchMax);
+   else
+      g_batchSize = InpBatchStart;
+   SaveBatch();
+   Msg(StringFormat("Batch %d closed %+.2f: next batch %d positions", g_batchId, g_lastBatchPL, g_batchSize),
+       g_lastBatchPL > 0 ? CLR_GREEN : CLR_RED);
+  }
+
+// Opens the batch: all positions share the structure stop and the R-multiple target.
+bool OpenBatch(const int dir, const double stopPrice, const string why)
+  {
+   MqlTick tk;
+   if(!SymbolInfoTick(_Symbol, tk))
+      return false;
+   double entry = dir > 0 ? tk.ask : tk.bid;
+   double dist  = dir * (entry - stopPrice);
+   double spread = tk.ask - tk.bid;
+   if(dist <= 0)
+     {
+      g_block = "price already beyond the stop";
+      return false;
+     }
+   if(dist < entry * InpMinStopPct / 100.0 || dist < g_exec.MinStopDistance())
+     {
+      g_lastSignal = StringFormat("%s skipped: stop too close (%.2f)", why, dist);
+      return false;
+     }
+   if(dist > entry * InpMaxStopPct / 100.0)
+     {
+      g_lastSignal = StringFormat("%s skipped: stop too far (%.2f)", why, dist);
+      return false;
+     }
+   if(InpMaxSpreadOfStop > 0 && spread > dist * InpMaxSpreadOfStop / 100.0)
+     {
+      g_lastSignal = StringFormat("%s skipped: spread %.2f too wide", why, spread);
+      return false;
+     }
+   double tpPrice = entry + dir * InpRewardR * dist;
+
+   // batch size, trimmed so the whole batch never risks more than InpMaxBatchRiskPct of the balance
+   int n = MathMin(g_batchSize, InpBatchMax);
+   double ts = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double tv = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double riskPerPos = (ts > 0) ? dist / ts * tv * InpLot : 0;
+   if(InpMaxBatchRiskPct > 0 && riskPerPos > 0)
+     {
+      int cap = (int)MathFloor(AccountInfoDouble(ACCOUNT_BALANCE) * InpMaxBatchRiskPct / 100.0 / riskPerPos);
+      if(cap < 1)
+        {
+         g_lastSignal = StringFormat("%s skipped: one position risks %.2f, above %.0f%% of balance", why, riskPerPos,
+                                     InpMaxBatchRiskPct);
+         return false;
+        }
+      n = MathMin(n, cap);
+     }
+
+   g_batchId++;
+   g_batchStart = TimeCurrent();
+   int opened = 0;
+   for(int i = 0; i < n; i++)
+     {
+      SymbolInfoTick(_Symbol, tk);
+      double px = dir > 0 ? tk.ask : tk.bid;
+      double sl = dir * (px - stopPrice), tp = dir * (tpPrice - px);
+      if(sl <= 0 || tp <= 0)
+         break;
+      string err;
+      double fill = 0;
+      ulong pos = g_exec.Open(dir, InpLot, sl, tp, InpTradeComment + ":B" + IntegerToString(g_batchId), err, fill);
+      if(pos == 0)
+        {
+         Msg("Order failed: " + err, CLR_RED);
+         break;
+        }
+      string e2;
+      if(PositionSelectByTicket(pos))
+         if(MathAbs(PositionGetDouble(POSITION_SL) - stopPrice) > _Point || MathAbs(PositionGetDouble(POSITION_TP) - tpPrice) > _Point)
+            g_exec.SetSLTP(pos, stopPrice, tpPrice, e2);
+      JournalOpen((long)pos, dir, "STRUCTURE", why, InpLot, fill, tk.ask - tk.bid, dist, InpRewardR * dist, 0,
+                  riskPerPos, 0, 0, "batch " + IntegerToString(g_batchId));
+      opened++;
+     }
+   if(opened == 0)
+     {
+      g_batchId--;
+      return false;
+     }
+   g_batchOpen = true;
+   SaveBatch();
+   g_lastSignal = StringFormat("%s: %s %d x %.2f, stop %s, target %s", why, dir > 0 ? "BUY" : "SELL", opened, InpLot,
+                               DoubleToString(stopPrice, _Digits), DoubleToString(tpPrice, _Digits));
+   Msg(g_lastSignal, CLR_BLUE);
+   return true;
+  }
+
+// Stop to entry once a position is InpBreakevenR in profit (only ever in the position's favour).
+void ManageBreakeven()
+  {
+   if(InpBreakevenR <= 0)
+      return;
+   MqlTick tk;
+   if(!SymbolInfoTick(_Symbol, tk))
+      return;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(t == 0 || !IsOurs())
+         continue;
+      int    d    = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 1 : -1;
+      double open = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl   = PositionGetDouble(POSITION_SL);
+      if(sl == 0 || d * (open - sl) <= 0)
+         continue;                                  // already at breakeven or better
+      double risk = d * (open - sl);
+      double px   = d > 0 ? tk.bid : tk.ask;
+      if(d * (px - open) >= InpBreakevenR * risk)
+        {
+         string err;
+         if(g_exec.MoveStop(t, open, err))
+            Msg(StringFormat("+%.1fR: stop to breakeven on #%I64u", InpBreakevenR, t), CLR_MUTED);
+        }
+     }
   }
 
 //==================================================================
@@ -271,42 +615,17 @@ int OnInit()
    ArrayInitialize(g_rowTicket, 0);
    ChartSetInteger(0, CHART_FOREGROUND, false);
    ChartSetInteger(0, CHART_SHOW_ONE_CLICK, false);
-
-   g_market = InpMarket;
-   if(g_market == MARKET_AUTO)
-      g_market = (StringFind(_Symbol, "BTC") >= 0) ? MARKET_BTC : MARKET_GOLD;
-   if(g_market == MARKET_BTC)
+   if(InpLot <= 0 || InpBatchStart < 1 || InpBatchMax < InpBatchStart || InpRewardR <= 0 || InpSwingBars < 1)
      {
-      g_lot = InpB_Lot;  g_spacing = InpB_Spacing;  g_maxLevels = InpB_MaxLevels;  g_posTP = InpB_PosTP;
-      g_posCut = InpB_PosLossCut;  g_basketTP = InpB_BasketTP;  g_basketStop = InpB_BasketStop;
-     }
-   else
-     {
-      g_lot = InpG_Lot;  g_spacing = InpG_Spacing;  g_maxLevels = InpG_MaxLevels;  g_posTP = InpG_PosTP;
-      g_posCut = InpG_PosLossCut;  g_basketTP = InpG_BasketTP;  g_basketStop = InpG_BasketStop;
-     }
-
-   if(g_lot <= 0 || g_spacing <= 0 || g_maxLevels < 1 || g_posTP <= 0 || g_posCut <= 0
-      || InpEmaSlow <= InpEmaFast)
-     {
-      Print("XAUScalper: check the inputs (lot, spacing, levels, TP and loss cut above 0; slow EMA above fast)");
+      Print("XAUScalper: check the inputs");
       return INIT_PARAMETERS_INCORRECT;
-     }
-   g_hDFast = iMA(_Symbol, PERIOD_D1, InpEmaFast, 0, MODE_EMA, PRICE_CLOSE);
-   g_hDSlow = iMA(_Symbol, PERIOD_D1, InpEmaSlow, 0, MODE_EMA, PRICE_CLOSE);
-   g_hDAtr  = iATR(_Symbol, PERIOD_D1, 14);
-   if(g_hDFast == INVALID_HANDLE || g_hDSlow == INVALID_HANDLE || g_hDAtr == INVALID_HANDLE)
-     {
-      Print("XAUScalper: could not create the daily indicators");
-      return INIT_FAILED;
      }
    g_exec.Init(_Symbol, InpMagic, InpSlippagePoints);
    JournalInit(InpJournal);
 
-   // Risk manager: day statistics and the margin-level emergency only (the grid has its own limits).
    RiskConfig cfg;
    cfg.magic = InpMagic;  cfg.riskPct = 1.0;  cfg.minLotMaxRiskPct = 0;  cfg.maxDailyLossPct = 0;
-   cfg.dailyTargetPct = 0;  cfg.maxConsecLosses = 0;  cfg.maxPositions = g_maxLevels;  cfg.maxDailyTrades = 0;
+   cfg.dailyTargetPct = 0;  cfg.maxConsecLosses = 0;  cfg.maxPositions = InpBatchMax;  cfg.maxDailyTrades = 0;
    cfg.minSecBetweenTrades = 0;  cfg.cooldownAfterLossMin = 0;  cfg.emergencyDDPct = 0;
    cfg.emergencyMarginLevel = InpEmergencyMarginLevel;  cfg.marginBufferPct = 0;
    cfg.emergencyPolicy = EMERGENCY_CLOSE_ALL;
@@ -322,14 +641,12 @@ int OnInit()
    if(MQLInfoInteger(MQL_TESTER))
       g_state = BOT_RUNNING;
    g_wasConnected = (bool)TerminalInfoInteger(TERMINAL_CONNECTED);
-   DayStartBalance();
-   LoadGrid();
-
-   bool symGold = StringFind(_Symbol, "XAU") >= 0 || StringFind(_Symbol, "GOLD") >= 0;
-   bool symBtc  = StringFind(_Symbol, "BTC") >= 0;
-   if((g_market == MARKET_GOLD && !symGold) || (g_market == MARKET_BTC && !symBtc))
-      Msg(StringFormat("Warning: %s settings on a %s chart.", g_market == MARKET_BTC ? "Bitcoin" : "Gold", _Symbol),
-          CLR_AMBER);
+   LoadBatch();
+   if(!g_batchOpen && CountOurs() > 0)          // positions without saved batch state
+     {
+      g_batchOpen = true;
+      g_batchStart = TimeCurrent() - 7 * 86400;
+     }
    if(IsRealAccount() && !InpAllowReal)
       Msg("REAL account: no new trades unless 'Allow trading on a REAL account' is on.", CLR_RED);
 
@@ -347,7 +664,6 @@ void OnDeinit(const int reason)
    if(reason == REASON_CHARTCHANGE || reason == REASON_PARAMETERS)
       GlobalVariableSet(StateKey(), (double)g_state);
    EventKillTimer();
-   IndicatorRelease(g_hDFast);  IndicatorRelease(g_hDSlow);  IndicatorRelease(g_hDAtr);
    ObjectsDeleteAll(0, PREFIX);
    ChartRedraw();
   }
@@ -364,14 +680,14 @@ void OnTick()
             ApplyEmergency();
         }
      }
-   Grid();
+   Engine();
   }
 
 void OnTimer()
   {
    CheckConnection();
    CheckAutoStart();
-   Grid();
+   Engine();
    if(g_risk.Update())
       ApplyEmergency();
    if(!MQLInfoInteger(MQL_TESTER))
@@ -379,91 +695,20 @@ void OnTimer()
   }
 
 //==================================================================
-//  GRID ENGINE
+//  ENGINE
 //==================================================================
-string GridKey() { return StateKey() + "_grid_" + _Symbol; }
-
-void SaveGrid()
+void Engine()
   {
-   GlobalVariableSet(GridKey() + "_dir", g_gridDir);
-   GlobalVariableSet(GridKey() + "_lev", g_gridLevels);
-   GlobalVariableSet(GridKey() + "_last", g_lastLevel);
-  }
-
-void LoadGrid()
-  {
-   if(MQLInfoInteger(MQL_TESTER) || !GlobalVariableCheck(GridKey() + "_dir"))
-      return;
-   g_gridDir    = (int)GlobalVariableGet(GridKey() + "_dir");
-   g_gridLevels = (int)GlobalVariableGet(GridKey() + "_lev");
-   g_lastLevel  = GlobalVariableGet(GridKey() + "_last");
-  }
-
-void EndGrid()
-  {
-   g_gridDir = 0;  g_gridLevels = 0;  g_lastLevel = 0;
-   SaveGrid();
-  }
-
-// Price distance that gains or loses `usd` on g_lot (0.01 lot of gold: $1 per $1 move).
-double UsdToDistance(const double usd)
-  {
-   double ts = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   double tv = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   if(ts <= 0 || tv <= 0)
-      return 0;
-   return usd / (g_lot * tv / ts);
-  }
-
-// Every tick:
-//   1. individual exits: +$4 take profit / -$5 loss cut (also set on the broker's server per order)
-//   2. basket exits: total floating +$12 -> close all; -$18 -> close all
-//   3. a grid with no open positions has ended; when RUNNING a new one starts in the daily direction
-//   4. when RUNNING: one more level every $3 against the last level, up to 8 levels
-void Grid()
-  {
-   // 1. individual exits (backup for the server-side TP/SL)
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   CheckBatchEnd();
+   ManageBreakeven();
+   UpdateNews();
+   int phase = NewsPhase();
+   if(phase == 1)
+      ProtectForNews();
+   if(phase != 2)
      {
-      ulong t = PositionGetTicket(i);
-      if(t == 0 || !IsOurs())
-         continue;
-      double net = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
-      string why = (net >= g_posTP) ? "take profit" : ((net <= -g_posCut) ? "loss cut" : "");
-      if(why == "")
-         continue;
-      string err;
-      NoteCloseReason(t, why);
-      if(!g_exec.Close(t, err))
-         Print(err);
-     }
-
-   // 2. basket exits
-   GridInfo g;
-   ReadGrid(g);
-   if(g.levels > 0)
-     {
-      string why = "";
-      if(g_basketTP > 0 && g.pl >= g_basketTP)
-         why = "basket take profit";
-      else if(g_basketStop > 0 && g.pl <= -g_basketStop)
-         why = "hard basket stop";
-      if(why != "")
-        {
-         CloseAll(why);
-         EndGrid();
-         Msg(StringFormat("Grid closed (%s): %+.2f", why, g.pl), why == "basket take profit" ? CLR_GREEN : CLR_RED);
-         return;
-        }
-     }
-
-   // 3. a grid without open positions is over
-   if(g.levels == 0 && g_gridDir != 0)
-      EndGrid();
-   if(g.levels > 0 && g_gridDir == 0)          // positions without saved state (e.g. a new install)
-     {
-      g_gridDir = g.dir;  g_gridLevels = g.levels;  g_lastLevel = g.lastLevel;
-      SaveGrid();
+      g_newsHi = 0;
+      g_newsLo = 0;
      }
 
    if(g_state != BOT_RUNNING)
@@ -471,11 +716,6 @@ void Grid()
       g_block = "";
       return;
      }
-   datetime now = TimeCurrent();
-   if(now == g_lastTry)                        // at most one order attempt per second
-      return;
-   g_lastTry = now;
-
    g_block = PlatformBlockReason();
    if(g_block != "")
       return;
@@ -484,103 +724,47 @@ void Grid()
       g_block = g_risk.LockText();
       return;
      }
-
-   MqlTick tick;
-   if(!SymbolInfoTick(_Symbol, tick))
-      return;
-
-   if(tick.ask - tick.bid > g_spacing / 2.0)
+   if(CountOurs() > 0)
      {
-      g_block = StringFormat("spread %.2f too wide for the %.2f spacing", tick.ask - tick.bid, g_spacing);
-      return;
-     }
-
-   // 4. next level
-   if(g_gridDir != 0)
-     {
-      if(g_gridLevels >= g_maxLevels)
-        {
-         g_block = StringFormat("all %d levels used: no more adding", g_maxLevels);
-         return;
-        }
-      double price = (g_gridDir > 0) ? tick.ask : tick.bid;
-      if(g_gridDir * (g_lastLevel - price) >= g_spacing)
-         OpenLevel(g_gridDir);
       g_block = "";
-      return;
+      return;                                     // one batch at a time
      }
 
-   // 3b. new grid
-   UpdateFilter();
-   if(DailyLimitHit())
+   if(phase == 1)
      {
-      g_block = StringFormat("daily loss limit %.1f%% reached: no new grid today", InpDailyLossPct);
+      g_block = "news in " + IntegerToString((int)((g_newsTime - TimeTradeServer()) / 60) + 1) + " min: no new entries";
       return;
      }
-   if(g_filter == 0)
+   if(phase == 2)
      {
-      g_block = g_filterText;
-      return;
-     }
-   g_gridDir = g_filter;
-   g_gridLevels = 0;
-   if(OpenLevel(g_filter))
-      g_grids++;
-   else
-      EndGrid();
-  }
-
-bool OpenLevel(const int dir)
-  {
-   double sl = UsdToDistance(g_posCut);
-   double tp = UsdToDistance(g_posTP);
-   if(sl <= 0 || tp <= 0)
-     {
-      g_block = "no tick value for " + _Symbol;
-      return false;
-     }
-   if(MathMin(sl, tp) < g_exec.MinStopDistance())
-     {
-      g_block = StringFormat("TP/loss cut closer than the broker allows (%.2f)", g_exec.MinStopDistance());
-      return false;
-     }
-   int    level = g_gridLevels + 1;
-   string err;
-   double fill = 0;
-   MqlTick tk;
-   SymbolInfoTick(_Symbol, tk);
-   ulong pos = g_exec.Open(dir, g_lot, sl, tp, InpTradeComment + ":L" + IntegerToString(level), err, fill);
-   if(pos == 0)
-     {
-      g_block = "order rejected: " + err;
-      Msg("Order failed: " + err, CLR_RED);
-      return false;
-     }
-   // SL / TP exactly g_posCut / g_posTP from the REAL fill price (the order was sent with
-   // distances from the requested price; slippage would make the loss bigger than the win)
-   if(PositionSelectByTicket(pos))
-     {
-      double f = PositionGetDouble(POSITION_PRICE_OPEN);
-      if(f > 0)
-         fill = f;
-      double wantSL = fill - dir * sl, wantTP = fill + dir * tp;
-      double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-      if(MathAbs(PositionGetDouble(POSITION_SL) - wantSL) > pt || MathAbs(PositionGetDouble(POSITION_TP) - wantTP) > pt)
+      double stop;
+      int d = NewsSignal(stop);
+      g_block = StringFormat("news breakout: waiting for a close outside %s - %s", DoubleToString(g_newsLo, _Digits),
+                             DoubleToString(g_newsHi, _Digits));
+      if(d != 0)
         {
-         string e2;
-         if(!g_exec.SetSLTP(pos, wantSL, wantTP, e2))
-            Msg(e2, CLR_RED);
+         g_newsTraded = g_newsTime;
+         OpenBatch(d, stop, "news breakout");
         }
+      return;
      }
-   g_gridLevels = level;
-   g_lastLevel  = fill;
-   SaveGrid();
-   g_trades++;
-   JournalOpen((long)pos, dir, "GRID", "level " + IntegerToString(level), g_lot, fill, tk.ask - tk.bid, sl, tp, 0,
-               g_posCut, 0, 0, "");
-   Msg(StringFormat("%s level %d/%d at %s", dir > 0 ? "BUY" : "SELL", level, g_maxLevels,
-                    DoubleToString(fill, _Digits)), CLR_BLUE);
-   return true;
+
+   // structure entry, evaluated once per closed entry-timeframe candle
+   datetime bar = iTime(_Symbol, InpEntryTF, 0);
+   if(bar == 0 || bar == g_lastEntryBar)
+      return;
+   UpdateBias();
+   double stop;
+   string why;
+   int d = EntrySignal(stop, why);
+   g_lastEntryBar = bar;
+   if(d == 0)
+     {
+      g_block = why;
+      return;
+     }
+   g_block = "";
+   OpenBatch(d, stop, TFName(InpEntryTF) + " break of structure");
   }
 
 //==================================================================
@@ -619,7 +803,7 @@ void CheckConnection()
    if(!connected && g_wasConnected)
      {
       g_wasConnected = false;
-      Msg("Connection lost. Each position's TP / loss cut stays on the server.", CLR_RED);
+      Msg("Connection lost. Stop loss and take profit stay on the broker's server.", CLR_RED);
      }
    else if(connected && !g_wasConnected)
      {
@@ -681,7 +865,7 @@ void DoStop()
   {
    g_state = BOT_STOPPED;
    GlobalVariableSet(ManualStopKey(), 1);
-   Msg("STOPPED: no new grids or levels. Open positions keep their TP / loss cut.", CLR_AMBER);
+   Msg("STOPPED: no new batches. Open positions keep their SL / TP.", CLR_AMBER);
   }
 
 void DoCloseAll()
@@ -785,14 +969,14 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
       return;
    string why = TakeCloseReason(posId);
    if(why == "")
-      why = (reason == DEAL_REASON_TP) ? "take profit" : (reason == DEAL_REASON_SL) ? "loss cut"
+      why = (reason == DEAL_REASON_TP) ? "take profit" : (reason == DEAL_REASON_SL) ? "stop loss"
             : (reason == DEAL_REASON_SO) ? "stop out" : "other";
    if(profit > 0)
       g_wins++;
    else
       g_losses++;
    double hold = (inMsc > 0 && outMsc >= inMsc) ? (outMsc - inMsc) / 1000.0 : 0.0;
-   JournalClose(posId, type == DEAL_TYPE_SELL ? "BUY" : "SELL", "GRID", lots, price, profit, comm, hold, 0, false, why);
+   JournalClose(posId, type == DEAL_TYPE_SELL ? "BUY" : "SELL", "STRUCTURE", lots, price, profit, comm, hold, 0, false, why);
   }
 
 //==================================================================
@@ -931,14 +1115,14 @@ void BuildPanel()
    MkRect("bg",     0, 0, PANEL_W, PANEL_H, CLR_BG, CLR_BORDER);
    MkRect("header", 0, 0, PANEL_W, 36, CLR_HEADER, CLR_BORDER);
    MkLabel("title", 14, 9, "XAU SCALPER", CLR_TEXT, 12, "Arial Bold");
-   MkLabel("mode", 150, 12, g_market == MARKET_BTC ? "CONTROLLED GRID - BITCOIN" : "CONTROLLED GRID - GOLD",
-           CLR_BLUE, 8, "Arial Bold");
+   MkLabel("mode", 150, 12, "MARKET STRUCTURE (" + TFName(InpBiasTF) + " / " + TFName(InpEntryTF) + ")", CLR_BLUE, 8,
+           "Arial Bold");
    MkRect("pill", PANEL_W - 118, 8, 106, 20, CLR_GREY, CLR_GREY);
    MkLabel("pill_t", PANEL_W - 65, 18, "STOPPED", clrWhite, 8, "Arial Bold", ANCHOR_CENTER);
    MkButton("b_min", PANEL_W - 146, 8, 22, 20, "-", CLR_GREY, clrWhite, 10);
    MkLabel("info", 14, 44, " ", CLR_MUTED, 8);
 
-   string titles[6] = {"BALANCE", "EQUITY", "DAY P/L", "GRID FLOATING P/L", "SPREAD", "MARGIN LEVEL"};
+   string titles[6] = {"BALANCE", "EQUITY", "DAY P/L", "OPEN P/L", "NEXT BATCH", "NEXT HIGH-IMPACT NEWS"};
    for(int i = 0; i < 6; i++)
      {
       int x = 14 + (i % 3) * 178;
@@ -955,7 +1139,7 @@ void BuildPanel()
    MkButton("b_close", 248, 188, 120, 32, "CLOSE ALL", CLR_GREY,    clrWhite, 9);
    MkButton("b_emerg", 376, 188, 152, 32, "EMERGENCY", CLR_DARKRED, clrWhite, 9);
 
-   MkLabel("t_title", 14, 226, "GRID POSITIONS (0)", CLR_MUTED, 7, "Arial Bold");
+   MkLabel("t_title", 14, 226, "BATCH POSITIONS (0)", CLR_MUTED, 7, "Arial Bold");
    string heads[6] = {"TICKET", "TYPE", "OPEN", "STOP LOSS", "TAKE PROFIT", "P/L"};
    for(int c = 0; c < 6; c++)
       MkLabel("h" + IntegerToString(c), ColX(c), ROW_Y0 + 6, heads[c], CLR_MUTED, 7, "Arial",
@@ -969,7 +1153,7 @@ void BuildPanel()
       MkButton("rx" + IntegerToString(r), 500, y - 2, 26, 18, "X", CLR_RED, clrWhite, 8);
       ShowObj("rx" + IntegerToString(r), false);
      }
-   MkLabel("t_empty", PANEL_W / 2, ROW_Y0 + 60, "No grid open", CLR_MUTED, 9, "Arial", ANCHOR_UPPER);
+   MkLabel("t_empty", PANEL_W / 2, ROW_Y0 + 60, "No open batch", CLR_MUTED, 9, "Arial", ANCHOR_UPPER);
 
    MkRect("sep3", 12, PANEL_H - 52, PANEL_W - 24, 1, CLR_BORDER, CLR_BORDER);
    MkLabel("f_msg",  14, PANEL_H - 44, g_lastMsg, g_lastMsgColor, 8);
@@ -984,13 +1168,11 @@ void UpdatePanel()
   {
    if(MQLInfoInteger(MQL_TESTER) && !MQLInfoInteger(MQL_VISUAL_MODE))
       return;
+   UpdateBias();
    bool   connected = (bool)TerminalInfoInteger(TERMINAL_CONNECTED);
    string cur = AccountInfoString(ACCOUNT_CURRENCY);
    double bal = AccountInfoDouble(ACCOUNT_BALANCE);
    double eq  = AccountInfoDouble(ACCOUNT_EQUITY);
-   GridInfo g;
-   ReadGrid(g);
-   UpdateFilter();
 
    string status = "STOPPED";
    color  pill   = CLR_GREY;
@@ -1003,28 +1185,29 @@ void UpdatePanel()
    SetText("info", AccountInfoString(ACCOUNT_COMPANY) + " | " + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN))
            + " (" + AccountMode() + ") | " + _Symbol, CLR_MUTED);
 
-   MqlTick tick;
-   double spread = SymbolInfoTick(_Symbol, tick) ? tick.ask - tick.bid : 0.0;
-   double ml = AccountInfoDouble(ACCOUNT_MARGIN) > 0 ? AccountInfoDouble(ACCOUNT_MARGIN_LEVEL) : 0.0;
-   double day = DayPL();
+   double openPL = OpenPL();
    SetText("s_v0", DoubleToString(bal, 2) + " " + cur, CLR_TEXT);
    SetText("s_v1", DoubleToString(eq, 2) + " " + cur, CLR_TEXT);
-   SetText("s_v2", Signed(day) + StringFormat("  (%.1f%%)", DayStartBalance() > 0 ? day / DayStartBalance() * 100 : 0),
-           PLColor(day));
-   SetText("s_v3", Signed(g.pl), PLColor(g.pl));
-   SetText("s_v4", DoubleToString(spread, _Digits), CLR_TEXT);
-   SetText("s_v5", ml > 0 ? DoubleToString(ml, 0) + "%" : "-", CLR_TEXT);
+   SetText("s_v2", Signed(g_risk.DayPL()), PLColor(g_risk.DayPL()));
+   SetText("s_v3", Signed(openPL), PLColor(openPL));
+   SetText("s_v4", IntegerToString(g_batchSize) + " x " + DoubleToString(InpLot, 2), CLR_TEXT);
+   string news = g_newsStatus;
+   if(news == "" && g_newsTime > 0)
+     {
+      int mins = (int)((g_newsTime - TimeTradeServer()) / 60);
+      news = TimeToString(g_newsTime, TIME_MINUTES) + (mins >= 0 ? " (in " + IntegerToString(mins) + " min)" : " (live)");
+     }
+   int phase = NewsPhase();
+   SetText("s_v5", news, phase > 0 ? CLR_AMBER : CLR_TEXT);
 
-   SetText("sig1", "Daily trend: " + g_filterText, g_filter > 0 ? CLR_GREEN : (g_filter < 0 ? CLR_RED : CLR_AMBER));
-   if(g_gridDir != 0)
-      SetText("sig2", StringFormat("%s grid: level %d/%d   next %s   basket +%.0f / -%.0f", g_gridDir > 0 ? "BUY" : "SELL",
-                                   g_gridLevels, g_maxLevels, g_gridLevels < g_maxLevels
-                                   ? DoubleToString(g_lastLevel - g_gridDir * g_spacing, 2) : "none",
-                                   g_basketTP, g_basketStop), CLR_MUTED);
+   SetText("sig1", TFName(InpBiasTF) + " structure: " + g_biasText,
+           g_bias > 0 ? CLR_GREEN : (g_bias < 0 ? CLR_RED : CLR_AMBER));
+   if(phase > 0 && g_newsName != "")
+      SetText("sig2", "News: " + g_newsName, CLR_AMBER);
    else
-      SetText("sig2", StringFormat("Grids %d   positions %d   won %d   lost %d   daily limit %s", g_grids, g_trades,
-                                   g_wins, g_losses, InpDailyLossPct > 0 ? DoubleToString(InpDailyLossPct, 1) + "%" : "off"),
-              CLR_MUTED);
+      SetText("sig2", StringFormat("Last batch %s   won %d / lost %d positions   %s swing H %s  L %s",
+                                   Signed(g_lastBatchPL), g_wins, g_losses, TFName(InpEntryTF),
+                                   DoubleToString(g_eSH, 2), DoubleToString(g_eSL, 2)), CLR_MUTED);
 
    int row = 0, total = 0;
    for(int i = 0; i < PositionsTotal(); i++)
@@ -1056,7 +1239,10 @@ void UpdatePanel()
       g_rowTicket[row] = 0;
       ShowObj("rx" + IntegerToString(row), false);
      }
-   SetText("t_title", "GRID POSITIONS (" + IntegerToString(total) + ")", CLR_MUTED);
+   string tt = "BATCH POSITIONS (" + IntegerToString(total) + ")";
+   if(total > MAX_ROWS)
+      tt += "   showing first " + IntegerToString(MAX_ROWS);
+   SetText("t_title", tt, CLR_MUTED);
    ShowObj("t_empty", total == 0);
 
    SetText("f_msg", g_lastMsg, g_lastMsgColor);
@@ -1067,13 +1253,15 @@ void UpdatePanel()
       cond = "Locked: " + g_risk.LockText();
       cc = CLR_RED;
      }
+   else if(g_state == BOT_RUNNING && total > 0)
+      cond = "Batch open: closes at its stop loss / take profit (breakeven at +" + DoubleToString(InpBreakevenR, 1) + "R).";
    else if(g_state == BOT_RUNNING && g_block != "")
      {
       cond = "Waiting: " + g_block;
       cc = CLR_AMBER;
      }
    else if(g_state == BOT_RUNNING)
-      cond = total > 0 ? "Grid active." : "Running: opening a grid.";
+      cond = "Running: watching the structure.";
    else if(InpAutoStart && ManualStop())
       cond = "Stopped by you: press START to resume.";
    else
