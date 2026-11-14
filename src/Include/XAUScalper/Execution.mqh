@@ -147,6 +147,32 @@ public:
       return (pos > 0) ? pos : m_trade.ResultOrder();
      }
 
+   // Market order sent WITHOUT waiting for the broker's answer (asynchronous), with exact SL/TP
+   // prices. Used to fire a whole batch in one go; fills arrive in OnTradeTransaction.
+   bool              OpenAsync(const int dir, const double lots, const double sl, const double tp,
+                               const string comment, string &err)
+     {
+      err = "";
+      MqlTick tick;
+      if(!SymbolInfoTick(m_sym, tick))
+        {
+         err = "no price";
+         return false;
+        }
+      int dg = Digits_();
+      m_trade.SetAsyncMode(true);
+      bool sent = (dir > 0) ? m_trade.Buy(lots, m_sym, tick.ask, NormalizeDouble(sl, dg), NormalizeDouble(tp, dg), comment)
+                            : m_trade.Sell(lots, m_sym, tick.bid, NormalizeDouble(sl, dg), NormalizeDouble(tp, dg), comment);
+      uint rc = m_trade.ResultRetcode();
+      m_trade.SetAsyncMode(false);
+      if(!sent || (rc != 0 && rc != TRADE_RETCODE_PLACED && rc != TRADE_RETCODE_DONE))
+        {
+         err = StringFormat("order not sent (%u: %s)", rc, m_trade.ResultRetcodeDescription());
+         return false;
+        }
+      return true;
+     }
+
    // Sets stop loss and take profit to exact prices (no "only in favour" check). For placing a new
    // position's SL/TP relative to its real fill price.
    bool              SetSLTP(const ulong ticket, const double sl, const double tp, string &err)

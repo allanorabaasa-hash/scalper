@@ -4,7 +4,7 @@ MetaTrader 5 Expert Advisor for **gold (XAUUSD) and bitcoin (BTCUSD)** that trad
 structure only, no indicators**, with an on-chart control panel. Runs on Kali Linux through a portable Wine staging build.
 Previous strategies are in git history only.
 
-## Strategy (v16.00): M1 market structure + real ticks
+## Strategy (v16.10): M1 market structure + real ticks
 
 Everything is read on the **M1** chart, closed candles only, no indicators.
 
@@ -33,7 +33,9 @@ moves to entry (breakeven). Trades are skipped when the stop is closer than 0.03
 wider than 0.40% (gold) / 0.80% (bitcoin), or when the spread is more than 25% of the stop.
 On M1, gold stops are typically $1.5-4 (0.01 lot: $1.5-4 per position).
 
-**Batches.** Each entry opens a batch of 0.01 positions with the same stop and target.
+**Batches.** Each entry opens a batch of 0.01 positions with the same stop and target. All
+orders of a batch are sent at once (asynchronously), so the batch fills within about a second
+at nearly the same price instead of one order every few seconds.
 First batch **5**. Batch closed in profit -> next batch **+5** (10, 15, 20 max).
 Batch closed at a loss -> back to **5**. One batch at a time. Safety cap: a batch never risks
 more than **15%** of the balance at its stop (fewer positions if needed; input, 0 = off).

@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "16.00"
+#property version   "16.10"
 #property description "Market structure only (no indicators), all on M1: break of structure / shift detection, live-tick"
 #property description "triggers confirmed by real tick flow when available. Batches of 5 x 0.01 (+5 after a win, 5 after a loss)."
 
@@ -16,7 +16,7 @@
 //  INPUTS
 //==================================================================
 input group "Market structure"
-input ENUM_TIMEFRAMES InpEntryTF            = PERIOD_M1;     // Structure timeframe (everything is read on this chart)
+input ENUM_TIMEFRAMES InpStructureTF        = PERIOD_M1;     // Structure timeframe (everything is read on this chart)
 input int             InpSwingBars          = 3;             // Swing point = higher/lower than this many candles each side
 input int             InpFreshBars          = 3;             // A break / shift this many candles old or newer is still tradable
 input double          InpMaxChaseR          = 0.5;           // Fresh break: skip if price already ran more than this x the stop past the level
@@ -103,6 +103,10 @@ int            g_batchId      = 0;
 bool           g_batchOpen    = false;
 datetime       g_batchStart   = 0;
 double         g_lastBatchPL  = 0;
+double         g_batchSL = 0, g_batchTP = 0;   // shared stop / target of the open batch
+double         g_batchDist = 0, g_batchRiskPos = 0;
+string         g_batchWhy = "";
+#define BATCH_GRACE_SEC 15                      // fills of an async batch may take a few seconds
 
 // news state
 datetime       g_newsTime     = 0;
@@ -235,7 +239,7 @@ bool ScanStructure(Structure &st, MqlRates &r[])
    st.trend = 0;  st.breakAge = 0;  st.breakDir = 0;  st.breakShift = false;  st.breakLevel = 0;  st.protect = 0;
    st.sh = 0;  st.sl = 0;  st.shBroken = true;  st.slBroken = true;  st.shIdx = 0;  st.slIdx = 0;
    ArraySetAsSeries(r, true);
-   int n = CopyRates(_Symbol, InpEntryTF, 0, LOOKBACK, r);
+   int n = CopyRates(_Symbol, InpStructureTF, 0, LOOKBACK, r);
    int k = InpSwingBars;
    if(n < 4 * k + 20)
       return false;
@@ -286,7 +290,7 @@ void ReadChart()
    g_bias = 0;  g_setupDir = 0;  g_freshDir = 0;
    if(!ScanStructure(st, r))
      {
-      g_biasText = "waiting for " + TFName(InpEntryTF) + " data";
+      g_biasText = "waiting for " + TFName(InpStructureTF) + " data";
       g_setupWhy = g_biasText;
       return;
      }
@@ -530,7 +534,7 @@ double BatchResult()
 // A batch is finished when none of its positions is open: size up after a win, back to start after a loss.
 void CheckBatchEnd()
   {
-   if(!g_batchOpen || CountOurs() > 0)
+   if(!g_batchOpen || CountOurs() > 0 || TimeCurrent() - g_batchStart < BATCH_GRACE_SEC)
       return;
    g_lastBatchPL = BatchResult();
    g_batchOpen = false;
@@ -593,28 +597,19 @@ bool OpenBatch(const int dir, const double stopPrice, const string why)
 
    g_batchId++;
    g_batchStart = TimeCurrent();
+   g_batchSL = stopPrice;  g_batchTP = tpPrice;  g_batchDist = dist;  g_batchRiskPos = riskPerPos;  g_batchWhy = why;
+   // fire every order of the batch at once (no waiting for each confirmation), so all positions
+   // fill within about a second at nearly the same price
    int opened = 0;
+   string comment = InpTradeComment + ":B" + IntegerToString(g_batchId);
    for(int i = 0; i < n; i++)
      {
-      SymbolInfoTick(_Symbol, tk);
-      double px = dir > 0 ? tk.ask : tk.bid;
-      double sl = dir * (px - stopPrice), tp = dir * (tpPrice - px);
-      if(sl <= 0 || tp <= 0)
-         break;
       string err;
-      double fill = 0;
-      ulong pos = g_exec.Open(dir, InpLot, sl, tp, InpTradeComment + ":B" + IntegerToString(g_batchId), err, fill);
-      if(pos == 0)
+      if(!g_exec.OpenAsync(dir, InpLot, stopPrice, tpPrice, comment, err))
         {
          Msg("Order failed: " + err, CLR_RED);
          break;
         }
-      string e2;
-      if(PositionSelectByTicket(pos))
-         if(MathAbs(PositionGetDouble(POSITION_SL) - stopPrice) > _Point || MathAbs(PositionGetDouble(POSITION_TP) - tpPrice) > _Point)
-            g_exec.SetSLTP(pos, stopPrice, tpPrice, e2);
-      JournalOpen((long)pos, dir, "STRUCTURE", why, InpLot, fill, tk.ask - tk.bid, dist, InpRewardR * dist, 0,
-                  riskPerPos, 0, 0, "batch " + IntegerToString(g_batchId));
       opened++;
      }
    if(opened == 0)
@@ -628,6 +623,27 @@ bool OpenBatch(const int dir, const double stopPrice, const string why)
                                DoubleToString(stopPrice, _Digits), DoubleToString(tpPrice, _Digits));
    Msg(g_lastSignal, CLR_BLUE);
    return true;
+  }
+
+// A position that filled without its stop or target (the broker dropped them) gets the batch's.
+void FixBatchStops()
+  {
+   if(g_batchSL <= 0)
+      return;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(t == 0 || !IsOurs())
+         continue;
+      if(PositionGetDouble(POSITION_SL) == 0 || PositionGetDouble(POSITION_TP) == 0)
+        {
+         string err;
+         double sl = PositionGetDouble(POSITION_SL) > 0 ? PositionGetDouble(POSITION_SL) : g_batchSL;
+         double tp = PositionGetDouble(POSITION_TP) > 0 ? PositionGetDouble(POSITION_TP) : g_batchTP;
+         if(!g_exec.SetSLTP(t, sl, tp, err))
+            Print(err);
+        }
+     }
   }
 
 // Stop to entry once a position is InpBreakevenR in profit (only ever in the position's favour).
@@ -776,9 +792,10 @@ void Engine()
       g_block = g_risk.LockText();
       return;
      }
-   if(CountOurs() > 0)
+   if(CountOurs() > 0 || g_batchOpen)
      {
       g_block = "";
+      FixBatchStops();
       return;                                     // one batch at a time
      }
 
@@ -802,7 +819,7 @@ void Engine()
      }
 
    // 1. read the chart once per closed candle (also right after the bot is attached)
-   datetime bar = iTime(_Symbol, InpEntryTF, 0);
+   datetime bar = iTime(_Symbol, InpStructureTF, 0);
    if(bar != 0 && bar != g_lastEntryBar)
      {
       ReadChart();
@@ -826,7 +843,7 @@ void Engine()
            {
             g_block = "";
             g_lastTraded = g_freshLevel;
-            OpenBatch(g_freshDir, stop, StringFormat("%s fresh %s", TFName(InpEntryTF), g_freshDir > 0 ? "bullish break" : "bearish break"));
+            OpenBatch(g_freshDir, stop, StringFormat("%s fresh %s", TFName(InpStructureTF), g_freshDir > 0 ? "bullish break" : "bearish break"));
             return;
            }
          g_block = "fresh break, ticks not confirming (" + g_tickText + ")";
@@ -856,11 +873,11 @@ void Engine()
       g_block = "level broken, ticks not confirming (" + g_tickText + ")";
       return;
      }
-   double stop = (g_setupDir > 0) ? MathMin(g_stopRef, iLow(_Symbol, InpEntryTF, 0)) - buffer
-                                  : MathMax(g_stopRef, iHigh(_Symbol, InpEntryTF, 0)) + buffer;
+   double stop = (g_setupDir > 0) ? MathMin(g_stopRef, iLow(_Symbol, InpStructureTF, 0)) - buffer
+                                  : MathMax(g_stopRef, iHigh(_Symbol, InpStructureTF, 0)) + buffer;
    g_block = "";
    g_lastTraded = g_level;
-   OpenBatch(g_setupDir, stop, TFName(InpEntryTF) + " break of structure");
+   OpenBatch(g_setupDir, stop, TFName(InpStructureTF) + " break of structure");
   }
 
 //==================================================================
@@ -1031,6 +1048,17 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
    if(HistoryDealGetString(trans.deal, DEAL_SYMBOL) != _Symbol)
       return;
    long entry = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+   if(entry == DEAL_ENTRY_IN && HistoryDealGetInteger(trans.deal, DEAL_MAGIC) == InpMagic)
+     {
+      MqlTick tk;
+      SymbolInfoTick(_Symbol, tk);
+      int d = (HistoryDealGetInteger(trans.deal, DEAL_TYPE) == DEAL_TYPE_BUY) ? 1 : -1;
+      JournalOpen(HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID), d, "STRUCTURE", g_batchWhy,
+                  HistoryDealGetDouble(trans.deal, DEAL_VOLUME), HistoryDealGetDouble(trans.deal, DEAL_PRICE),
+                  tk.ask - tk.bid, g_batchDist, InpRewardR * g_batchDist, 0, g_batchRiskPos, 0, 0,
+                  "batch " + IntegerToString(g_batchId));
+      return;
+     }
    if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY)
       return;
 
@@ -1211,7 +1239,7 @@ void BuildPanel()
    MkRect("bg",     0, 0, PANEL_W, PANEL_H, CLR_BG, CLR_BORDER);
    MkRect("header", 0, 0, PANEL_W, 36, CLR_HEADER, CLR_BORDER);
    MkLabel("title", 14, 9, IsBtc() ? "BTC SCALPER" : "XAU SCALPER", CLR_TEXT, 12, "Arial Bold");
-   MkLabel("mode", 150, 12, "MARKET STRUCTURE (" + TFName(InpEntryTF) + " + TICKS)", CLR_BLUE, 8, "Arial Bold");
+   MkLabel("mode", 150, 12, "MARKET STRUCTURE (" + TFName(InpStructureTF) + " + TICKS)", CLR_BLUE, 8, "Arial Bold");
    MkRect("pill", PANEL_W - 118, 8, 106, 20, CLR_GREY, CLR_GREY);
    MkLabel("pill_t", PANEL_W - 65, 18, "STOPPED", clrWhite, 8, "Arial Bold", ANCHOR_CENTER);
    MkButton("b_min", PANEL_W - 146, 8, 22, 20, "-", CLR_GREY, clrWhite, 10);
@@ -1294,7 +1322,7 @@ void UpdatePanel()
    int phase = NewsPhase();
    SetText("s_v5", news, phase > 0 ? CLR_AMBER : CLR_TEXT);
 
-   SetText("sig1", TFName(InpEntryTF) + " structure: " + g_biasText,
+   SetText("sig1", TFName(InpStructureTF) + " structure: " + g_biasText,
            g_bias > 0 ? CLR_GREEN : (g_bias < 0 ? CLR_RED : CLR_AMBER));
    if(phase > 0 && g_newsName != "")
       SetText("sig2", "News: " + g_newsName, CLR_AMBER);
@@ -1302,7 +1330,7 @@ void UpdatePanel()
       SetText("sig2", "Real ticks: " + g_tickText, CLR_MUTED);
    else
       SetText("sig2", StringFormat("Last batch %s   won %d / lost %d positions   %s swing H %s  L %s",
-                                   Signed(g_lastBatchPL), g_wins, g_losses, TFName(InpEntryTF),
+                                   Signed(g_lastBatchPL), g_wins, g_losses, TFName(InpStructureTF),
                                    DoubleToString(g_eSH, 2), DoubleToString(g_eSL, 2)), CLR_MUTED);
 
    int row = 0, total = 0;
