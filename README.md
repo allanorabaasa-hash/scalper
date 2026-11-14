@@ -4,22 +4,26 @@ MetaTrader 5 Expert Advisor for **gold (XAUUSD) and bitcoin (BTCUSD)** that trad
 structure only, no indicators**, with an on-chart control panel. Runs on Kali Linux through a portable Wine staging build.
 Previous strategies are in git history only.
 
-## Strategy (v14.10)
+## Strategy (v15.00)
 
-**Side (H1 structure).** Swing points: a candle whose high (low) is above (below) the 3 candles
+**Side (M5 structure).** Swing points: a candle whose high (low) is above (below) the 3 candles
 on each side. Higher highs + higher lows, and price above the last higher low = **buy side**.
 Lower highs + lower lows, and price below the last lower high = **sell side**. Anything else =
 range / unclear: no trade.
 
-**Entry (M15 pullback + break of structure).** On the buy side the bot waits for a pullback
-(M15 makes a lower high). The first M15 close back above that lower high is the entry: the
-pullback is over and the trend resumes. Sell side mirrored.
+**Setup (M1 pullback).** On the buy side the bot waits for an M1 pullback (a lower high). That
+lower high becomes the trigger level; the setup is re-checked on every closed M1 candle.
 
-**Stop and target.** Stop below the pullback's lowest low (above the highest high for sells)
-plus spread and a small buffer: where the idea is wrong. Target 2 x the stop distance (2R).
-At +1R every position's stop moves to entry (breakeven). Trades are skipped when the stop is
-closer than 0.03% of price or wider than 0.40% (gold, about $1.2 / $16) or 0.80% (bitcoin,
-about $20 / $540), or when the spread is more than 25% of the stop.
+**Trigger (live tick + real tick flow).** The entry fires on the tick that breaks the level, not
+at the candle close, and only if the real ticks of the last 15 seconds confirm it: at least 60%
+of the price-changing ticks moved in the trade's direction and price is higher (buys) / lower
+(sells) than 15 seconds ago. One batch per broken level. Sell side mirrored.
+
+**Stop and target.** Stop beyond the pullback's extreme (including the current candle) plus
+spread and a small buffer. Target 2 x the stop distance (2R). At +1R every position's stop
+moves to entry (breakeven). Trades are skipped when the stop is closer than 0.03% of price or
+wider than 0.40% (gold) / 0.80% (bitcoin), or when the spread is more than 25% of the stop.
+On M1, gold stops are typically $1.5-4 (0.01 lot: $1.5-4 per position).
 
 **Batches.** Each entry opens a batch of 0.01 positions with the same stop and target.
 First batch **5**. Batch closed in profit -> next batch **+5** (10, 15, 20 max).
@@ -60,8 +64,8 @@ BTCUSDm, preset `structure_btc.set`. Results go in `docs/VALIDATION.md`.
 ## Panel
 
 START, STOP (no new batches; open positions keep their SL / TP), CLOSE ALL, EMERGENCY. Shows
-balance, equity, day and open P/L, next batch size, next high-impact news, the H1 structure,
-the M15 swing high/low, the last batch result, positions with SL / TP, and why it is waiting.
+balance, equity, day and open P/L, next batch size, next high-impact news, the M5 structure,
+the M1 swing high/low, the real-tick reading, the last batch result, positions with SL / TP, and why it is waiting.
 
 ## Layout
 

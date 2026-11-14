@@ -4,9 +4,9 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "14.10"
-#property description "Market structure only (no indicators): H1 swing structure gives the side, an M15 pullback"
-#property description "and break of structure gives the entry. Batches of 5 x 0.01; +5 after a winning batch, back to 5 after a loss."
+#property version   "15.00"
+#property description "Market structure only (no indicators): M5 swing structure gives the side; an M1 pullback broken"
+#property description "on the live tick, confirmed by real tick flow, gives the entry. Batches of 5 x 0.01 (+5 after a win, 5 after a loss)."
 
 #include <XAUScalper\RiskManager.mqh>
 #include <XAUScalper\Execution.mqh>
@@ -16,8 +16,8 @@
 //  INPUTS
 //==================================================================
 input group "Market structure"
-input ENUM_TIMEFRAMES InpBiasTF             = PERIOD_H1;     // Structure timeframe (side: HH/HL = buy, LH/LL = sell)
-input ENUM_TIMEFRAMES InpEntryTF            = PERIOD_M15;    // Entry timeframe (pullback + break of structure)
+input ENUM_TIMEFRAMES InpBiasTF             = PERIOD_M5;     // Structure timeframe (side: HH/HL = buy, LH/LL = sell)
+input ENUM_TIMEFRAMES InpEntryTF            = PERIOD_M1;     // Entry timeframe (pullback, broken on the live tick)
 input int             InpSwingBars          = 3;             // Swing point = higher/lower than this many candles each side
 input double          InpRewardR            = 2.0;           // Take profit at this many times the stop distance
 input double          InpBreakevenR         = 1.0;           // Move the stop to entry after this many R in profit (0 = off)
@@ -25,6 +25,11 @@ input double          InpMinStopPct         = 0.03;          // Skip if the stop
 input double          InpMaxStopPct         = 0.40;          // Gold: skip if the stop is further than this % of price (~$16)
 input double          InpMaxStopPctBtc      = 0.80;          // Bitcoin: skip if the stop is further than this % of price (~$540)
 input double          InpMaxSpreadOfStop    = 25;            // Skip if the spread is more than this % of the stop distance
+
+input group "Real tick confirmation"
+input bool            InpTickConfirm        = true;          // Enter only when the real ticks push in the trade's direction
+input int             InpTickWindowSec      = 15;            // Look at the ticks of the last N seconds
+input double          InpTickMinRatio       = 60;            // At least this % of price-changing ticks in the trade's direction
 
 input group "Batches"
 input double          InpLot                = 0.01;          // Lot per position (fixed)
@@ -81,6 +86,12 @@ double         g_eSH = 0, g_eSL = 0;    // latest M15 swing high / low (panel)
 string         g_block        = "";     // why no entry right now
 string         g_lastSignal   = "none yet";
 datetime       g_lastEntryBar = 0;
+int            g_setupDir     = 0;      // armed setup: +1 buy / -1 sell when price breaks g_level
+double         g_level        = 0;      // the pullback's lower high (buy) / higher low (sell)
+double         g_stopRef      = 0;      // the pullback's extreme (stop goes beyond it)
+string         g_setupWhy     = "";
+double         g_lastTraded   = 0;      // level already traded (one batch per break)
+string         g_tickText     = "-";
 int            g_wins = 0, g_losses = 0;
 
 // batch state (persisted in global variables)
@@ -263,24 +274,20 @@ void UpdateBias()
       g_biasText = "RANGE / unclear: no trade";
   }
 
-// Entry: in an up structure, the M15 pullback makes a lower high; the first M15 close back
-// above that lower high (break of structure) is the buy. Stop below the pullback's low.
-// Mirrored for sells. Returns the direction (0 = none) and the stop price.
-int EntrySignal(double &stop, string &why)
+// Setup (closed candles): in an up structure, the entry-timeframe pullback makes a lower high
+// that has not been broken yet; the bot arms a buy at that level, stop beyond the pullback's
+// lowest low. Mirrored for sells. Returns the armed direction (0 = none).
+int Setup(double &level, double &stopRef, string &why)
   {
    Swings w;
    MqlRates r[];
-   stop = 0;
-   why  = "";
+   level = 0;  stopRef = 0;  why = "";
    if(!FindSwings(InpEntryTF, w, r))
      {
       why = "waiting for " + TFName(InpEntryTF) + " data";
       return 0;
      }
    g_eSH = w.h1;  g_eSL = w.l1;
-   MqlTick tk;
-   SymbolInfoTick(_Symbol, tk);
-   double buffer = (tk.ask - tk.bid) + r[1].close * 0.0002;
    if(g_bias > 0)
      {
       if(!(w.h1 < w.h2))
@@ -288,15 +295,15 @@ int EntrySignal(double &stop, string &why)
          why = "up structure: waiting for a pullback (lower high on " + TFName(InpEntryTF) + ")";
          return 0;
         }
-      if(!(r[1].close > w.h1 && r[2].close <= w.h1))
+      if(r[1].close > w.h1)
         {
-         why = StringFormat("pullback: waiting for a close above %s", DoubleToString(w.h1, _Digits));
+         why = "pullback level already broken: waiting for a new pullback";
          return 0;
         }
       double low = r[1].low;
       for(int s = 2; s <= w.sh1; s++)
          low = MathMin(low, r[s].low);
-      stop = low - buffer;
+      level = w.h1;  stopRef = low;
       return 1;
      }
    if(g_bias < 0)
@@ -306,19 +313,56 @@ int EntrySignal(double &stop, string &why)
          why = "down structure: waiting for a pullback (higher low on " + TFName(InpEntryTF) + ")";
          return 0;
         }
-      if(!(r[1].close < w.l1 && r[2].close >= w.l1))
+      if(r[1].close < w.l1)
         {
-         why = StringFormat("pullback: waiting for a close below %s", DoubleToString(w.l1, _Digits));
+         why = "pullback level already broken: waiting for a new pullback";
          return 0;
         }
       double high = r[1].high;
       for(int s = 2; s <= w.sl1; s++)
          high = MathMax(high, r[s].high);
-      stop = high + buffer;
+      level = w.l1;  stopRef = high;
       return -1;
      }
    why = g_biasText;
    return 0;
+  }
+
+// Real tick flow over the last InpTickWindowSec seconds: share of price-changing ticks (bid)
+// that moved in direction dir, and the net move. true when both agree with dir.
+bool TickFlowConfirms(const int dir, string &text)
+  {
+   if(!InpTickConfirm)
+     {
+      text = "tick check off";
+      return true;
+     }
+   MqlTick t[];
+   long now = (long)TimeCurrent() * 1000;
+   MqlTick last;
+   if(SymbolInfoTick(_Symbol, last))
+      now = last.time_msc;
+   int n = CopyTicks(_Symbol, t, COPY_TICKS_INFO, (ulong)(now - InpTickWindowSec * 1000), 0);
+   if(n < 3)
+     {
+      text = "too few ticks";
+      return false;
+     }
+   int with = 0, against = 0;
+   for(int i = 1; i < n; i++)
+     {
+      double d = t[i].bid - t[i - 1].bid;
+      if(d == 0)
+         continue;
+      if(dir * d > 0)
+         with++;
+      else
+         against++;
+     }
+   double ratio = (with + against) > 0 ? 100.0 * with / (with + against) : 0;
+   double move  = dir * (t[n - 1].bid - t[0].bid);
+   text = StringFormat("ticks %.0f%% %s, move %+.2f in %ds", ratio, dir > 0 ? "up" : "down", move, InpTickWindowSec);
+   return ratio >= InpTickMinRatio && move > 0;
   }
 
 //==================================================================
@@ -753,22 +797,49 @@ void Engine()
       return;
      }
 
-   // structure entry, evaluated once per closed entry-timeframe candle
+   // 1. arm the setup once per closed entry-timeframe candle (structure on closed candles only)
    datetime bar = iTime(_Symbol, InpEntryTF, 0);
-   if(bar == 0 || bar == g_lastEntryBar)
-      return;
-   UpdateBias();
-   double stop;
-   string why;
-   int d = EntrySignal(stop, why);
-   g_lastEntryBar = bar;
-   if(d == 0)
+   if(bar != 0 && bar != g_lastEntryBar)
      {
-      g_block = why;
+      UpdateBias();
+      g_setupDir = Setup(g_level, g_stopRef, g_setupWhy);
+      g_lastEntryBar = bar;
+     }
+   if(g_setupDir == 0)
+     {
+      g_block = g_setupWhy;
       return;
      }
+   if(g_level == g_lastTraded)
+     {
+      g_block = "this break was already traded: waiting for a new pullback";
+      return;
+     }
+
+   // 2. trigger on the live tick: price breaks the level ...
+   MqlTick tk;
+   if(!SymbolInfoTick(_Symbol, tk))
+      return;
+   double px = tk.bid;
+   if(g_setupDir * (px - g_level) <= 0)
+     {
+      g_block = StringFormat("%s armed: waiting for price to break %s", g_setupDir > 0 ? "BUY" : "SELL",
+                             DoubleToString(g_level, _Digits));
+      return;
+     }
+   // ... and the real ticks push the same way
+   if(!TickFlowConfirms(g_setupDir, g_tickText))
+     {
+      g_block = "level broken, ticks not confirming (" + g_tickText + ")";
+      return;
+     }
+   // stop beyond the pullback's extreme, including the current candle
+   double buffer = (tk.ask - tk.bid) + px * 0.0002;
+   double stop = (g_setupDir > 0) ? MathMin(g_stopRef, iLow(_Symbol, InpEntryTF, 0)) - buffer
+                                  : MathMax(g_stopRef, iHigh(_Symbol, InpEntryTF, 0)) + buffer;
    g_block = "";
-   OpenBatch(d, stop, TFName(InpEntryTF) + " break of structure");
+   g_lastTraded = g_level;
+   OpenBatch(g_setupDir, stop, TFName(InpEntryTF) + " break + ticks");
   }
 
 //==================================================================
@@ -1208,6 +1279,8 @@ void UpdatePanel()
            g_bias > 0 ? CLR_GREEN : (g_bias < 0 ? CLR_RED : CLR_AMBER));
    if(phase > 0 && g_newsName != "")
       SetText("sig2", "News: " + g_newsName, CLR_AMBER);
+   else if(g_tickText != "-" && CountOurs() == 0 && g_setupDir != 0)
+      SetText("sig2", "Real ticks: " + g_tickText, CLR_MUTED);
    else
       SetText("sig2", StringFormat("Last batch %s   won %d / lost %d positions   %s swing H %s  L %s",
                                    Signed(g_lastBatchPL), g_wins, g_losses, TFName(InpEntryTF),

@@ -12,3 +12,4 @@ A result counts only with enough trades (at least 100) and on months not used fo
 
 | Date | Symbol | Period | Settings | Batches | Positions | Net | Profit factor | Max DD | Notes |
 |---|---|---|---|---|---|---|---|---|---|
+| 2026-11-14 | - | - | v15.00 | - | - | - | - | - | Structure moved to M5 (side) / M1 (entry), live-tick trigger with real tick-flow confirmation. Not yet tested. |
