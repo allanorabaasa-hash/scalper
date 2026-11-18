@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "17.00"
+#property version   "17.10"
 #property description "Market structure only (no indicators), all on M1: break of structure / shift detection, live-tick"
 #property description "triggers confirmed by real tick flow when available. Modes: Slow (1 +/-1), Regular (2 +/-2), Beast (5, +5 / back to 5). R:R 1:2."
 
@@ -41,8 +41,8 @@ input int             InpTickWindowSec      = 15;            // Look at the tick
 input double          InpTickMinRatio       = 60;            // At least this % of price-changing ticks in the trade's direction
 
 input group "Batches"
-input ENUM_BOT_MODE   InpMode               = BOTMODE_BEAST;    // Mode: Slow / Regular / Beast
-input double          InpLot                = 0.01;          // Lot size per position
+input ENUM_BOT_MODE   InpMode               = BOTMODE_BEAST;    // Mode: Slow / Regular / Beast (also switchable on the panel)
+input double          InpLot                = 0.01;          // Lot size per position (also changeable on the panel)
 input int             InpBatchMax           = 20;            // Never more than this many positions in one batch
 input double          InpMaxBatchRiskPct    = 15;            // Batch stop-loss risk at most this % of balance (fewer positions if needed; 0 = off)
 
@@ -95,6 +95,8 @@ int            g_freshDir     = 0;      // a fresh break of structure / shift to
 double         g_freshLevel   = 0, g_freshStop = 0;
 string         g_block        = "";     // why no entry right now
 string         g_lastSignal   = "none yet";
+int            g_mode         = BOTMODE_BEAST;   // current mode and lot (panel or inputs)
+double         g_lot          = 0.01;
 datetime       g_lastEntryBar = 0;
 int            g_setupDir     = 0;      // armed setup: +1 buy / -1 sell when price breaks g_level
 double         g_level        = 0;      // the pullback's lower high (buy) / higher low (sell)
@@ -142,8 +144,8 @@ const color CLR_GREY    = C'87,96,106';
 const color CLR_BLUE    = C'31,111,235';
 
 #define PANEL_W  540
-#define PANEL_H  470
-#define ROW_Y0   234
+#define PANEL_H  506
+#define ROW_Y0   270
 #define ROW_H    22
 
 //==================================================================
@@ -156,11 +158,72 @@ string StateKey()
 string ManualStopKey() { return StateKey() + "_manualstop_" + _Symbol; }
 bool   ManualStop()    { return GlobalVariableCheck(ManualStopKey()); }
 string BatchKey()      { return StateKey() + "_batch_" + _Symbol; }
+string PrefKey()       { return StateKey() + "_pref_" + _Symbol; }
+
+// Mode and lot: the panel's choice is kept across restarts; a value changed in the inputs
+// dialog wins over it (the inputs it was chosen against are remembered).
+void LoadPrefs()
+  {
+   g_mode = InpMode;
+   g_lot  = InpLot;
+   if(MQLInfoInteger(MQL_TESTER))
+      return;
+   if(GlobalVariableCheck(PrefKey() + "_inMode") && (int)GlobalVariableGet(PrefKey() + "_inMode") == (int)InpMode
+      && GlobalVariableCheck(PrefKey() + "_mode"))
+      g_mode = (int)GlobalVariableGet(PrefKey() + "_mode");
+   if(GlobalVariableCheck(PrefKey() + "_inLot") && MathAbs(GlobalVariableGet(PrefKey() + "_inLot") - InpLot) < 1e-9
+      && GlobalVariableCheck(PrefKey() + "_lot"))
+      g_lot = GlobalVariableGet(PrefKey() + "_lot");
+   SavePrefs();
+  }
+
+void SavePrefs()
+  {
+   if(MQLInfoInteger(MQL_TESTER))
+      return;
+   GlobalVariableSet(PrefKey() + "_inMode", (double)InpMode);
+   GlobalVariableSet(PrefKey() + "_inLot", InpLot);
+   GlobalVariableSet(PrefKey() + "_mode", (double)g_mode);
+   GlobalVariableSet(PrefKey() + "_lot", g_lot);
+  }
+
+double NormLot(double v)
+  {
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double vmax = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   if(step <= 0) step = 0.01;
+   v = MathRound(v / step) * step;
+   if(vmin > 0) v = MathMax(v, vmin);
+   if(vmax > 0) v = MathMin(v, vmax);
+   return NormalizeDouble(v, 2);
+  }
+
+void SetMode(const int m)
+  {
+   if(m == g_mode)
+      return;
+   g_mode = m;
+   g_batchSize = ModeStart();
+   SaveBatch();
+   SavePrefs();
+   Msg(StringFormat("%s mode: next batch %d position%s", ModeName(), g_batchSize, g_batchSize == 1 ? "" : "s"), CLR_BLUE);
+  }
+
+void SetLot(const double v)
+  {
+   double n = NormLot(v);
+   if(n <= 0)
+      return;
+   g_lot = n;
+   SavePrefs();
+   Msg(StringFormat("Lot size %.2f from the next batch", g_lot), CLR_BLUE);
+  }
 string TFName(const ENUM_TIMEFRAMES tf) { return StringSubstr(EnumToString(tf), 7); }
 bool   IsBtc()         { return StringFind(_Symbol, "BTC") >= 0; }
-int    ModeStart()     { return InpMode == BOTMODE_SLOW ? 1 : (InpMode == BOTMODE_REGULAR ? 2 : 5); }
+int    ModeStart()     { return g_mode == BOTMODE_SLOW ? 1 : (g_mode == BOTMODE_REGULAR ? 2 : 5); }
 int    ModeStep()      { return ModeStart(); }
-string ModeName()      { return InpMode == BOTMODE_SLOW ? "SLOW" : (InpMode == BOTMODE_REGULAR ? "REGULAR" : "BEAST"); }
+string ModeName()      { return g_mode == BOTMODE_SLOW ? "SLOW" : (g_mode == BOTMODE_REGULAR ? "REGULAR" : "BEAST"); }
 // Bitcoin swings are about twice as wide as gold's in % terms
 double MaxStopPct()    { return IsBtc() ? InpMaxStopPctBtc : InpMaxStopPct; }
 
@@ -511,7 +574,7 @@ void SaveBatch()
    GlobalVariableSet(BatchKey() + "_start", (double)g_batchStart);
    GlobalVariableSet(BatchKey() + "_last", g_lastBatchPL);
    GlobalVariableSet(BatchKey() + "_risk", g_batchRisk);
-   GlobalVariableSet(BatchKey() + "_mode", (double)InpMode);
+   GlobalVariableSet(BatchKey() + "_mode", (double)g_mode);
   }
 
 void LoadBatch()
@@ -526,7 +589,7 @@ void LoadBatch()
    g_lastBatchPL = GlobalVariableGet(BatchKey() + "_last");
    g_batchRisk   = GlobalVariableCheck(BatchKey() + "_risk") ? GlobalVariableGet(BatchKey() + "_risk") : 0;
    // a different mode than last time starts again from that mode's first size
-   if(!GlobalVariableCheck(BatchKey() + "_mode") || (int)GlobalVariableGet(BatchKey() + "_mode") != (int)InpMode)
+   if(!GlobalVariableCheck(BatchKey() + "_mode") || (int)GlobalVariableGet(BatchKey() + "_mode") != (int)g_mode)
       g_batchSize = ModeStart();
    g_batchSize   = MathMax(ModeStart(), MathMin(g_batchSize, InpBatchMax));
   }
@@ -567,7 +630,7 @@ void CheckBatchEnd()
      }
    else if(g_lastBatchPL < -neutral)
      {
-      g_batchSize = (InpMode == BOTMODE_BEAST) ? ModeStart() : MathMax(ModeStart(), g_batchSize - ModeStep());
+      g_batchSize = (g_mode == BOTMODE_BEAST) ? ModeStart() : MathMax(ModeStart(), g_batchSize - ModeStep());
       verdict = "loss";
      }
    else
@@ -612,7 +675,7 @@ bool OpenBatch(const int dir, const double stopPrice, const string why)
    int n = MathMin(g_batchSize, InpBatchMax);
    double ts = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
    double tv = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   double riskPerPos = (ts > 0) ? dist / ts * tv * InpLot : 0;
+   double riskPerPos = (ts > 0) ? dist / ts * tv * g_lot : 0;
    if(InpMaxBatchRiskPct > 0 && riskPerPos > 0)
      {
       int cap = (int)MathFloor(AccountInfoDouble(ACCOUNT_BALANCE) * InpMaxBatchRiskPct / 100.0 / riskPerPos);
@@ -636,7 +699,7 @@ bool OpenBatch(const int dir, const double stopPrice, const string why)
    for(int i = 0; i < n; i++)
      {
       string err;
-      if(!g_exec.OpenAsync(dir, InpLot, stopPrice, tpPrice, comment, err))
+      if(!g_exec.OpenAsync(dir, g_lot, stopPrice, tpPrice, comment, err))
         {
          Msg("Order failed: " + err, CLR_RED);
          break;
@@ -651,7 +714,7 @@ bool OpenBatch(const int dir, const double stopPrice, const string why)
    g_batchOpen = true;
    g_batchRisk = riskPerPos * opened;
    SaveBatch();
-   g_lastSignal = StringFormat("%s: %s %d x %.2f, stop %s, target %s", why, dir > 0 ? "BUY" : "SELL", opened, InpLot,
+   g_lastSignal = StringFormat("%s: %s %d x %.2f, stop %s, target %s", why, dir > 0 ? "BUY" : "SELL", opened, g_lot,
                                DoubleToString(stopPrice, _Digits), DoubleToString(tpPrice, _Digits));
    Msg(g_lastSignal, CLR_BLUE);
    return true;
@@ -715,7 +778,8 @@ int OnInit()
    ArrayInitialize(g_rowTicket, 0);
    ChartSetInteger(0, CHART_FOREGROUND, false);
    ChartSetInteger(0, CHART_SHOW_ONE_CLICK, false);
-   if(InpLot <= 0 || InpBatchMax < ModeStart() || InpSwingBars < 1)
+   LoadPrefs();
+   if(g_lot <= 0 || InpBatchMax < ModeStart() || InpSwingBars < 1)
      {
       Print("XAUScalper: check the inputs");
       return INIT_PARAMETERS_INCORRECT;
@@ -959,9 +1023,33 @@ void CheckConnection()
 
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
   {
+   if(id == CHARTEVENT_OBJECT_ENDEDIT && sparam == P("e_lot"))
+     {
+      double v = StringToDouble(ObjectGetString(0, sparam, OBJPROP_TEXT));
+      if(v > 0)
+         SetLot(v);
+      ObjectSetString(0, sparam, OBJPROP_TEXT, DoubleToString(g_lot, 2));
+      UpdatePanel();
+      return;
+     }
    if(id != CHARTEVENT_OBJECT_CLICK || StringFind(sparam, PREFIX) != 0)
       return;
    ObjectSetInteger(0, sparam, OBJPROP_STATE, false);
+
+   if(sparam == P("b_m0") || sparam == P("b_m1") || sparam == P("b_m2"))
+     {
+      SetMode((int)StringToInteger(StringSubstr(sparam, StringLen(P("b_m")))));
+      UpdatePanel();
+      return;
+     }
+   if(sparam == P("b_lm") || sparam == P("b_lp"))
+     {
+      double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+      if(step <= 0) step = 0.01;
+      SetLot(g_lot + (sparam == P("b_lp") ? step : -step));
+      UpdatePanel();
+      return;
+     }
 
    if(sparam == P("b_start"))
       DoStart();
@@ -1211,6 +1299,29 @@ void MkLabel(const string name, int x, int y, const string text, color clr,
    ObjectSetInteger(0, o, OBJPROP_HIDDEN, true);
   }
 
+void MkEdit(const string name, int x, int y, int w, int h, const string text)
+  {
+   string o = P(name);
+   if(ObjectFind(0, o) < 0)
+      ObjectCreate(0, o, OBJ_EDIT, 0, 0, 0);
+   ObjectSetInteger(0, o, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, o, OBJPROP_XDISTANCE, InpPanelX + x);
+   ObjectSetInteger(0, o, OBJPROP_YDISTANCE, InpPanelY + y);
+   ObjectSetInteger(0, o, OBJPROP_XSIZE, w);
+   ObjectSetInteger(0, o, OBJPROP_YSIZE, h);
+   ObjectSetInteger(0, o, OBJPROP_BGCOLOR, CLR_HEADER);
+   ObjectSetInteger(0, o, OBJPROP_BORDER_COLOR, CLR_BORDER);
+   ObjectSetInteger(0, o, OBJPROP_COLOR, CLR_TEXT);
+   ObjectSetInteger(0, o, OBJPROP_ALIGN, ALIGN_CENTER);
+   ObjectSetString(0, o, OBJPROP_FONT, "Arial Bold");
+   ObjectSetInteger(0, o, OBJPROP_FONTSIZE, 9);
+   ObjectSetString(0, o, OBJPROP_TEXT, text);
+   ObjectSetInteger(0, o, OBJPROP_READONLY, false);
+   ObjectSetInteger(0, o, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, o, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, o, OBJPROP_ZORDER, 10);
+  }
+
 void MkButton(const string name, int x, int y, int w, int h, const string text, color bg, color fg, int size = 9)
   {
    string o = P(name);
@@ -1311,7 +1422,17 @@ void BuildPanel()
    MkButton("b_close", 248, 188, 120, 32, "CLOSE ALL", CLR_GREY,    clrWhite, 9);
    MkButton("b_emerg", 376, 188, 152, 32, "EMERGENCY", CLR_DARKRED, clrWhite, 9);
 
-   MkLabel("t_title", 14, 226, "BATCH POSITIONS (0)", CLR_MUTED, 7, "Arial Bold");
+   // mode and lot size, changeable while running (apply from the next batch)
+   MkLabel("l_mode", 14, 234, "MODE", CLR_MUTED, 7, "Arial Bold");
+   MkButton("b_m0", 52,  228, 70, 24, "SLOW",    CLR_GREY, clrWhite, 8);
+   MkButton("b_m1", 126, 228, 80, 24, "REGULAR", CLR_GREY, clrWhite, 8);
+   MkButton("b_m2", 210, 228, 70, 24, "BEAST",   CLR_GREY, clrWhite, 8);
+   MkLabel("l_lot", 312, 234, "LOT", CLR_MUTED, 7, "Arial Bold");
+   MkButton("b_lm", 340, 228, 26, 24, "-", CLR_GREY, clrWhite, 10);
+   MkEdit("e_lot", 370, 228, 70, 24, DoubleToString(g_lot, 2));
+   MkButton("b_lp", 444, 228, 26, 24, "+", CLR_GREY, clrWhite, 10);
+
+   MkLabel("t_title", 14, 262, "BATCH POSITIONS (0)", CLR_MUTED, 7, "Arial Bold");
    string heads[6] = {"TICKET", "TYPE", "OPEN", "STOP LOSS", "TAKE PROFIT", "P/L"};
    for(int c = 0; c < 6; c++)
       MkLabel("h" + IntegerToString(c), ColX(c), ROW_Y0 + 6, heads[c], CLR_MUTED, 7, "Arial",
@@ -1361,7 +1482,20 @@ void UpdatePanel()
    SetText("s_v1", DoubleToString(eq, 2) + " " + cur, CLR_TEXT);
    SetText("s_v2", Signed(g_risk.DayPL()), PLColor(g_risk.DayPL()));
    SetText("s_v3", Signed(openPL), PLColor(openPL));
-   SetText("s_v4", ModeName() + ": " + IntegerToString(g_batchSize) + " x " + DoubleToString(InpLot, 2), CLR_TEXT);
+   SetText("s_v4", ModeName() + ": " + IntegerToString(g_batchSize) + " x " + DoubleToString(g_lot, 2), CLR_TEXT);
+   for(int m = 0; m < 3; m++)
+     {
+      color mc = (m == g_mode) ? CLR_BLUE : CLR_GREY;
+      ObjectSetInteger(0, P("b_m" + IntegerToString(m)), OBJPROP_BGCOLOR, mc);
+      ObjectSetInteger(0, P("b_m" + IntegerToString(m)), OBJPROP_BORDER_COLOR, mc);
+     }
+   static double shownLot = -1;                    // only rewrite the box when the lot changed,
+   if(shownLot != g_lot)                           // so typing in it is not overwritten
+     {
+      ObjectSetString(0, P("e_lot"), OBJPROP_TEXT, DoubleToString(g_lot, 2));
+      shownLot = g_lot;
+     }
+   ObjectSetString(0, P("mode"), OBJPROP_TEXT, ModeName() + " MODE | " + TFName(InpStructureTF) + " STRUCTURE + TICKS");
    string news = g_newsStatus;
    if(news == "" && g_newsTime > 0)
      {

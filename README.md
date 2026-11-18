@@ -4,7 +4,7 @@ MetaTrader 5 Expert Advisor for **gold (XAUUSD) and bitcoin (BTCUSD)** that trad
 structure only, no indicators**, with an on-chart control panel. Runs on Kali Linux through a portable Wine staging build.
 Previous strategies are in git history only.
 
-## Strategy (v17.00): M1 market structure + real ticks
+## Strategy (v17.10): M1 market structure + real ticks
 
 Everything is read on the **M1** chart, closed candles only, no indicators.
 
@@ -47,6 +47,11 @@ neither a win nor a loss: the size stays the same, it never increases on a 0 res
 positions per batch; a batch never risks more than 15% of the balance at its stop (fewer
 positions if needed). **Lot size** is an input (*Lot size per position*, default 0.01).
 Changing the mode starts again from that mode's first size.
+
+**Switch while running, on the panel:** the **SLOW / REGULAR / BEAST** buttons (the active one
+is blue) and the **LOT** box with - / + (or type a lot and press Enter). Changes apply from the
+next batch, are remembered across restarts, and are per chart and per account. A value changed
+later in the EA's Inputs dialog takes over from the panel's.
 
 **Risk : reward is strictly 1 : 2.** After each fill the target is set to exactly 2 x the real
 distance between the fill price and the stop. At +1R the stop moves to the entry (breakeven).
@@ -100,7 +105,8 @@ BTCUSDm, preset `structure_btc.set`. Results go in `docs/VALIDATION.md`.
 
 ## Panel
 
-START, STOP (no new batches; open positions keep their SL / TP), CLOSE ALL, EMERGENCY. Shows
+START, STOP (no new batches; open positions keep their SL / TP), CLOSE ALL, EMERGENCY, the mode
+buttons and the lot box. Shows
 balance, equity, day and open P/L, next batch size, next high-impact news, the M1 structure
 (and when it last broke or shifted), the armed level, the real-tick reading, the last batch result, positions with SL / TP, and why it is waiting.
 
