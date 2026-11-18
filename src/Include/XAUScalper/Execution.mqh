@@ -186,6 +186,18 @@ public:
       return false;
      }
 
+   // Close without waiting for the broker's answer (to close several positions at once).
+   bool              CloseAsync(const ulong ticket, string &err)
+     {
+      err = "";
+      m_trade.SetAsyncMode(true);
+      bool ok = m_trade.PositionClose(ticket, m_slipPoints);
+      m_trade.SetAsyncMode(false);
+      if(!ok)
+         err = StringFormat("close #%I64u failed (%u: %s)", ticket, m_trade.ResultRetcode(), m_trade.ResultRetcodeDescription());
+      return ok;
+     }
+
    bool              Close(const ulong ticket, string &err)
      {
       err = "";

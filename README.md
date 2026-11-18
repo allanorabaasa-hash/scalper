@@ -4,7 +4,7 @@ MetaTrader 5 Expert Advisor for **gold (XAUUSD) and bitcoin (BTCUSD)** that trad
 structure only, no indicators**, with an on-chart control panel. Runs on Kali Linux through a portable Wine staging build.
 Previous strategies are in git history only.
 
-## Strategy (v17.10): M1 market structure + real ticks
+## Strategy (v17.20): M1 market structure + real ticks
 
 Everything is read on the **M1** chart, closed candles only, no indicators.
 
@@ -54,7 +54,19 @@ next batch, are remembered across restarts, and are per chart and per account. A
 later in the EA's Inputs dialog takes over from the panel's.
 
 **Risk : reward is strictly 1 : 2.** After each fill the target is set to exactly 2 x the real
-distance between the fill price and the stop. At +1R the stop moves to the entry (breakeven).
+distance between the fill price and the stop.
+
+**Smart exit** (input *Smart exit*, on). The way from the batch's entry to its take profit is
+split in three parts: **L1** (1/3), **L2** (2/3) and **TP**.
+1. Price touches **L2**: every stop moves to its entry (breakeven).
+2. Price comes back to **L1**: half the positions close there; if price keeps going back to the
+   entry, the rest close at breakeven.
+3. Price goes back up to **L2**: half of the remaining positions close there.
+4. The rest closes at **L1** if price comes back again, or at **TP**.
+
+Example, buy batch of 5 at 100, stop 97, TP 106 (L1 102, L2 104): up to 104 (stops to 100),
+back to 102 (2 closed), up to 104 again (1 closed), then TP (last 2) or back to 102 (last 2).
+A single position cannot be halved: in Slow mode it is managed by the breakeven stop, L1 and TP.
 
 **News (high-impact USD, MT5 calendar).**
 - 15 min before a release: no new entries; positions in profit move their stop to breakeven.

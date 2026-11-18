@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "17.10"
+#property version   "17.20"
 #property description "Market structure only (no indicators), all on M1: break of structure / shift detection, live-tick"
 #property description "triggers confirmed by real tick flow when available. Modes: Slow (1 +/-1), Regular (2 +/-2), Beast (5, +5 / back to 5). R:R 1:2."
 
@@ -29,7 +29,7 @@ input ENUM_TIMEFRAMES InpStructureTF        = PERIOD_M1;     // Structure timefr
 input int             InpSwingBars          = 3;             // Swing point = higher/lower than this many candles each side
 input int             InpFreshBars          = 3;             // A break / shift this many candles old or newer is still tradable
 input double          InpMaxChaseR          = 0.5;           // Fresh break: skip if price already ran more than this x the stop past the level
-input double          InpBreakevenR         = 1.0;           // Move the stop to entry after this many R in profit (0 = off)
+input bool            InpSmartExit          = true;          // Smart exit: target split in 3 parts (L1, L2, TP), see README
 input double          InpMinStopPct         = 0.03;          // Skip if the stop is closer than this % of price (gold ~$1.2)
 input double          InpMaxStopPct         = 0.40;          // Gold: skip if the stop is further than this % of price (~$16)
 input double          InpMaxStopPctBtc      = 0.80;          // Bitcoin: skip if the stop is further than this % of price (~$540)
@@ -116,7 +116,10 @@ double         g_batchSL = 0, g_batchTP = 0;   // shared stop / target of the op
 double         g_batchDist = 0, g_batchRiskPos = 0;
 string         g_batchWhy = "";
 #define BATCH_GRACE_SEC 15
-double         g_batchRisk = 0;                 // money lost if the whole batch hits its stop                      // fills of an async batch may take a few seconds
+double         g_batchRisk = 0;                 // money lost if the whole batch hits its stop
+int            g_smStage = 0;                   // smart exit: 0 before L2, 1 L2 touched (stops at entry),
+                                                //   2 half closed at L1, 3 half of the rest closed at L2
+double         g_smEntry = 0;                   // the batch's average entry price                      // fills of an async batch may take a few seconds
 
 // news state
 datetime       g_newsTime     = 0;
@@ -575,6 +578,10 @@ void SaveBatch()
    GlobalVariableSet(BatchKey() + "_last", g_lastBatchPL);
    GlobalVariableSet(BatchKey() + "_risk", g_batchRisk);
    GlobalVariableSet(BatchKey() + "_mode", (double)g_mode);
+   GlobalVariableSet(BatchKey() + "_sl", g_batchSL);
+   GlobalVariableSet(BatchKey() + "_tp", g_batchTP);
+   GlobalVariableSet(BatchKey() + "_smst", g_smStage);
+   GlobalVariableSet(BatchKey() + "_sment", g_smEntry);
   }
 
 void LoadBatch()
@@ -588,6 +595,10 @@ void LoadBatch()
    g_batchStart  = (datetime)(long)GlobalVariableGet(BatchKey() + "_start");
    g_lastBatchPL = GlobalVariableGet(BatchKey() + "_last");
    g_batchRisk   = GlobalVariableCheck(BatchKey() + "_risk") ? GlobalVariableGet(BatchKey() + "_risk") : 0;
+   g_batchSL     = GlobalVariableCheck(BatchKey() + "_sl") ? GlobalVariableGet(BatchKey() + "_sl") : 0;
+   g_batchTP     = GlobalVariableCheck(BatchKey() + "_tp") ? GlobalVariableGet(BatchKey() + "_tp") : 0;
+   g_smStage     = GlobalVariableCheck(BatchKey() + "_smst") ? (int)GlobalVariableGet(BatchKey() + "_smst") : 0;
+   g_smEntry     = GlobalVariableCheck(BatchKey() + "_sment") ? GlobalVariableGet(BatchKey() + "_sment") : 0;
    // a different mode than last time starts again from that mode's first size
    if(!GlobalVariableCheck(BatchKey() + "_mode") || (int)GlobalVariableGet(BatchKey() + "_mode") != (int)g_mode)
       g_batchSize = ModeStart();
@@ -691,6 +702,7 @@ bool OpenBatch(const int dir, const double stopPrice, const string why)
    g_batchId++;
    g_batchStart = TimeCurrent();
    g_batchSL = stopPrice;  g_batchTP = tpPrice;  g_batchDist = dist;  g_batchRiskPos = riskPerPos;  g_batchWhy = why;
+   g_smStage = 0;  g_smEntry = 0;
    g_batchRisk = riskPerPos * n;
    // fire every order of the batch at once (no waiting for each confirmation), so all positions
    // fill within about a second at nearly the same price
@@ -741,32 +753,107 @@ void FixBatchStops()
      }
   }
 
-// Stop to entry once a position is InpBreakevenR in profit (only ever in the position's favour).
-void ManageBreakeven()
+// Smart exit. The distance from the batch's entry to its take profit (2R) is split in 3 parts:
+//   L1 = 1/3 of the way (0.67R), L2 = 2/3 (1.33R), TP = the full target (2R).
+//   stage 0  stop at the structure stop, target TP. Price touches L2 -> every stop moves to its
+//            entry (breakeven)                                                      -> stage 1
+//   stage 1  price comes back to L1 -> close half of the positions                  -> stage 2
+//            (if it keeps falling to the entry, the rest close at breakeven on the server)
+//   stage 2  price goes back up to L2 -> close half of the remaining positions      -> stage 3
+//   stage 3  the remainder closes at L1 if price comes back again, or at TP (server)
+// Prices are the closing side (bid for buys, ask for sells). A single position cannot be halved:
+// it stays and is managed by the breakeven stop, L1 (stage 3) and TP.
+void ManageSmartExit()
   {
-   if(InpBreakevenR <= 0)
+   if(!InpSmartExit || !g_batchOpen)
       return;
-   MqlTick tk;
-   if(!SymbolInfoTick(_Symbol, tk))
-      return;
+   ulong  tk[];
+   int    n = 0, dir = 0;
+   double sumOpen = 0, sl0 = 0;
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
       ulong t = PositionGetTicket(i);
       if(t == 0 || !IsOurs())
          continue;
-      int    d    = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 1 : -1;
-      double open = PositionGetDouble(POSITION_PRICE_OPEN);
-      double sl   = PositionGetDouble(POSITION_SL);
-      if(sl == 0 || d * (open - sl) <= 0)
-         continue;                                  // already at breakeven or better
-      double risk = d * (open - sl);
-      double px   = d > 0 ? tk.bid : tk.ask;
-      if(d * (px - open) >= InpBreakevenR * risk)
+      ArrayResize(tk, n + 1);
+      tk[n++] = t;
+      dir = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 1 : -1;
+      sumOpen += PositionGetDouble(POSITION_PRICE_OPEN);
+      if(sl0 == 0)
+         sl0 = PositionGetDouble(POSITION_SL);
+     }
+   if(n == 0)
+      return;
+   if(g_smEntry <= 0)
+     {
+      if(TimeCurrent() - g_batchStart < 3)
+         return;                                     // let all async fills arrive first
+      g_smEntry = sumOpen / n;                       // first time the batch is seen filled
+      if(g_batchSL <= 0)
+         g_batchSL = sl0;                            // e.g. after a restart without saved state
+      SaveBatch();
+     }
+   double risk = dir * (g_smEntry - g_batchSL);
+   if(risk <= 0)
+      return;
+   double T  = REWARD_R * risk;
+   double L1 = g_smEntry + dir * T / 3.0;
+   double L2 = g_smEntry + dir * 2.0 * T / 3.0;
+   MqlTick q;
+   if(!SymbolInfoTick(_Symbol, q))
+      return;
+   double px = dir > 0 ? q.bid : q.ask;
+   string err;
+
+   if(g_smStage == 0 && dir * (px - L2) >= 0)
+     {
+      for(int i = 0; i < n; i++)
+         if(PositionSelectByTicket(tk[i]))
+            g_exec.MoveStop(tk[i], PositionGetDouble(POSITION_PRICE_OPEN), err);
+      g_smStage = 1;
+      SaveBatch();
+      Msg("Smart exit: L2 reached, all stops moved to entry (breakeven)", CLR_GREEN);
+      return;
+     }
+   if(g_smStage == 1 && dir * (px - L1) <= 0)
+     {
+      int k = n / 2;
+      for(int i = 0; i < k; i++)
         {
-         string err;
-         if(g_exec.MoveStop(t, open, err))
-            Msg(StringFormat("+%.1fR: stop to breakeven on #%I64u", InpBreakevenR, t), CLR_MUTED);
+         NoteCloseReason(tk[i], "smart exit: half at L1");
+         if(!g_exec.CloseAsync(tk[i], err))
+            Print(err);
         }
+      g_smStage = 2;
+      SaveBatch();
+      Msg(StringFormat("Smart exit: back to L1, closed %d of %d; the rest at breakeven or L2", k, n), CLR_AMBER);
+      return;
+     }
+   if(g_smStage == 2 && dir * (px - L2) >= 0)
+     {
+      int k = n / 2;
+      for(int i = 0; i < k; i++)
+        {
+         NoteCloseReason(tk[i], "smart exit: half at L2");
+         if(!g_exec.CloseAsync(tk[i], err))
+            Print(err);
+        }
+      g_smStage = 3;
+      SaveBatch();
+      Msg(StringFormat("Smart exit: L2 again, closed %d of %d; the rest at L1 or TP", k, n), CLR_GREEN);
+      return;
+     }
+   if(g_smStage == 3 && dir * (px - L1) <= 0)
+     {
+      for(int i = 0; i < n; i++)
+        {
+         NoteCloseReason(tk[i], "smart exit: rest at L1");
+         if(!g_exec.CloseAsync(tk[i], err))
+            Print(err);
+        }
+      g_smStage = 4;
+      SaveBatch();
+      Msg(StringFormat("Smart exit: back to L1, closed the last %d", n), CLR_AMBER);
      }
   }
 
@@ -864,7 +951,7 @@ void OnTimer()
 void Engine()
   {
    CheckBatchEnd();
-   ManageBreakeven();
+   ManageSmartExit();
    UpdateNews();
    int phase = NewsPhase();
    if(phase == 1)
@@ -1455,6 +1542,26 @@ void BuildPanel()
   }
 
 string Signed(const double v) { return (v >= 0 ? "+" : "") + DoubleToString(v, 2); }
+
+string SmartExitText()
+  {
+   if(!InpSmartExit)
+      return "Batch open: closes at its stop loss / take profit.";
+   if(g_smEntry <= 0 || g_batchSL <= 0)
+      return "Batch open: waiting for the fills.";
+   double risk = MathAbs(g_smEntry - g_batchSL);
+   int    dir  = (g_batchSL < g_smEntry) ? 1 : -1;
+   double L1 = g_smEntry + dir * REWARD_R * risk / 3.0, L2 = g_smEntry + dir * 2.0 * REWARD_R * risk / 3.0;
+   string lv = "L1 " + DoubleToString(L1, 2) + "  L2 " + DoubleToString(L2, 2) + ": ";
+   switch(g_smStage)
+     {
+      case 0: return lv + "at L2 stops go to entry";
+      case 1: return lv + "stops at entry; half closes if back to L1";
+      case 2: return lv + "half closed; half of rest at L2";
+      case 3: return lv + "rest closes at L1 or TP";
+     }
+   return lv + "closing";
+  }
 color  PLColor(const double v){ return v > 0 ? CLR_GREEN : (v < 0 ? CLR_RED : CLR_TEXT); }
 
 void UpdatePanel()
@@ -1561,7 +1668,7 @@ void UpdatePanel()
       cc = CLR_RED;
      }
    else if(g_state == BOT_RUNNING && total > 0)
-      cond = "Batch open: closes at its stop loss / take profit (breakeven at +" + DoubleToString(InpBreakevenR, 1) + "R).";
+      cond = SmartExitText();
    else if(g_state == BOT_RUNNING && g_block != "")
      {
       cond = "Waiting: " + g_block;
