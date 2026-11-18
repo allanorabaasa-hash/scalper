@@ -4,7 +4,7 @@ MetaTrader 5 Expert Advisor for **gold (XAUUSD) and bitcoin (BTCUSD)** that trad
 structure only, no indicators**, with an on-chart control panel. Runs on Kali Linux through a portable Wine staging build.
 Previous strategies are in git history only.
 
-## Strategy (v16.10): M1 market structure + real ticks
+## Strategy (v17.00): M1 market structure + real ticks
 
 Everything is read on the **M1** chart, closed candles only, no indicators.
 
@@ -33,12 +33,23 @@ moves to entry (breakeven). Trades are skipped when the stop is closer than 0.03
 wider than 0.40% (gold) / 0.80% (bitcoin), or when the spread is more than 25% of the stop.
 On M1, gold stops are typically $1.5-4 (0.01 lot: $1.5-4 per position).
 
-**Batches.** Each entry opens a batch of 0.01 positions with the same stop and target. All
-orders of a batch are sent at once (asynchronously), so the batch fills within about a second
-at nearly the same price instead of one order every few seconds.
-First batch **5**. Batch closed in profit -> next batch **+5** (10, 15, 20 max).
-Batch closed at a loss -> back to **5**. One batch at a time. Safety cap: a batch never risks
-more than **15%** of the balance at its stop (fewer positions if needed; input, 0 = off).
+**Modes and batches.** Each entry opens a batch of positions with the same stop and target, all
+sent at once so they fill within about a second. Input **Mode**:
+
+| Mode | First batch | After a winning batch | After a losing batch |
+|---|---|---|---|
+| Slow | 1 position | +1 | -1 (never below 1) |
+| Regular | 2 positions | +2 | -2 (never below 2) |
+| **Beast** (default) | 5 positions | +5 | back to 5 |
+
+A batch that ends at about zero (breakeven exits, spread: within 20% of the batch's risk) is
+neither a win nor a loss: the size stays the same, it never increases on a 0 result. Max 20
+positions per batch; a batch never risks more than 15% of the balance at its stop (fewer
+positions if needed). **Lot size** is an input (*Lot size per position*, default 0.01).
+Changing the mode starts again from that mode's first size.
+
+**Risk : reward is strictly 1 : 2.** After each fill the target is set to exactly 2 x the real
+distance between the fill price and the stop. At +1R the stop moves to the entry (breakeven).
 
 **News (high-impact USD, MT5 calendar).**
 - 15 min before a release: no new entries; positions in profit move their stop to breakeven.
@@ -54,6 +65,22 @@ BTC stop costs $3 per position). Bitcoin also trades at weekends.
 
 No daily loss limit. Emergency close-all below 100% margin level. Auto-start whenever MT5 is
 connected (STOP is remembered per chart). Refuses new trades on a REAL account unless allowed.
+
+## Several accounts, each with its own mode
+
+One MT5 terminal can be logged into one account at a time, so each extra account gets its own
+portable copy of MT5:
+
+```bash
+./scripts/add-account.sh 2      # creates C:\MT5\Acc2 and opens it: log in to account 2 there
+./scripts/add-account.sh 3      # and so on
+./scripts/add-account.sh --list
+```
+
+Your normal MT5 is account 1. In every terminal attach XAUScalper and pick its own **Mode** and
+**Lot size** (e.g. account 1 Beast, account 2 Regular, account 3 Slow). `start.sh` and the
+login watchdog (`install-autostart.sh`) start every account's terminal when the internet is up
+and restart any that closes; `install.sh` updates the EA in all of them; `stop.sh` closes all.
 
 ## Setup
 
@@ -85,5 +112,5 @@ src/Include/XAUScalper/*.mqh       risk manager (day stats, emergency), executio
 tools/analyze_trades.py            report from the EA journal (+ tests)
 tools/presets/structure_*.set      Strategy Tester presets (gold, btc)
 docs/VALIDATION.md                 test results log
-scripts/                           install, start/stop MT5, auto-start
+scripts/                           install, add-account, start/stop MT5, auto-start
 ```

@@ -4,9 +4,9 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "16.10"
+#property version   "17.00"
 #property description "Market structure only (no indicators), all on M1: break of structure / shift detection, live-tick"
-#property description "triggers confirmed by real tick flow when available. Batches of 5 x 0.01 (+5 after a win, 5 after a loss)."
+#property description "triggers confirmed by real tick flow when available. Modes: Slow (1 +/-1), Regular (2 +/-2), Beast (5, +5 / back to 5). R:R 1:2."
 
 #include <XAUScalper\RiskManager.mqh>
 #include <XAUScalper\Execution.mqh>
@@ -15,12 +15,20 @@
 //==================================================================
 //  INPUTS
 //==================================================================
+enum ENUM_BOT_MODE
+  {
+   BOTMODE_SLOW    = 0,   // Slow: 1 position, +1 after a win, -1 after a loss
+   BOTMODE_REGULAR = 1,   // Regular: 2 positions, +2 after a win, -2 after a loss
+   BOTMODE_BEAST   = 2    // Beast: 5 positions, +5 after a win, back to 5 after a loss
+  };
+
+#define REWARD_R 2.0   // risk : reward is strictly 1 : 2
+
 input group "Market structure"
 input ENUM_TIMEFRAMES InpStructureTF        = PERIOD_M1;     // Structure timeframe (everything is read on this chart)
 input int             InpSwingBars          = 3;             // Swing point = higher/lower than this many candles each side
 input int             InpFreshBars          = 3;             // A break / shift this many candles old or newer is still tradable
 input double          InpMaxChaseR          = 0.5;           // Fresh break: skip if price already ran more than this x the stop past the level
-input double          InpRewardR            = 2.0;           // Take profit at this many times the stop distance
 input double          InpBreakevenR         = 1.0;           // Move the stop to entry after this many R in profit (0 = off)
 input double          InpMinStopPct         = 0.03;          // Skip if the stop is closer than this % of price (gold ~$1.2)
 input double          InpMaxStopPct         = 0.40;          // Gold: skip if the stop is further than this % of price (~$16)
@@ -33,9 +41,8 @@ input int             InpTickWindowSec      = 15;            // Look at the tick
 input double          InpTickMinRatio       = 60;            // At least this % of price-changing ticks in the trade's direction
 
 input group "Batches"
-input double          InpLot                = 0.01;          // Lot per position (fixed)
-input int             InpBatchStart         = 5;             // Positions in the first batch (and after a losing batch)
-input int             InpBatchStep          = 5;             // Add this many positions after a winning batch
+input ENUM_BOT_MODE   InpMode               = BOTMODE_BEAST;    // Mode: Slow / Regular / Beast
+input double          InpLot                = 0.01;          // Lot size per position
 input int             InpBatchMax           = 20;            // Never more than this many positions in one batch
 input double          InpMaxBatchRiskPct    = 15;            // Batch stop-loss risk at most this % of balance (fewer positions if needed; 0 = off)
 
@@ -106,7 +113,8 @@ double         g_lastBatchPL  = 0;
 double         g_batchSL = 0, g_batchTP = 0;   // shared stop / target of the open batch
 double         g_batchDist = 0, g_batchRiskPos = 0;
 string         g_batchWhy = "";
-#define BATCH_GRACE_SEC 15                      // fills of an async batch may take a few seconds
+#define BATCH_GRACE_SEC 15
+double         g_batchRisk = 0;                 // money lost if the whole batch hits its stop                      // fills of an async batch may take a few seconds
 
 // news state
 datetime       g_newsTime     = 0;
@@ -150,6 +158,9 @@ bool   ManualStop()    { return GlobalVariableCheck(ManualStopKey()); }
 string BatchKey()      { return StateKey() + "_batch_" + _Symbol; }
 string TFName(const ENUM_TIMEFRAMES tf) { return StringSubstr(EnumToString(tf), 7); }
 bool   IsBtc()         { return StringFind(_Symbol, "BTC") >= 0; }
+int    ModeStart()     { return InpMode == BOTMODE_SLOW ? 1 : (InpMode == BOTMODE_REGULAR ? 2 : 5); }
+int    ModeStep()      { return ModeStart(); }
+string ModeName()      { return InpMode == BOTMODE_SLOW ? "SLOW" : (InpMode == BOTMODE_REGULAR ? "REGULAR" : "BEAST"); }
 // Bitcoin swings are about twice as wide as gold's in % terms
 double MaxStopPct()    { return IsBtc() ? InpMaxStopPctBtc : InpMaxStopPct; }
 
@@ -499,11 +510,13 @@ void SaveBatch()
    GlobalVariableSet(BatchKey() + "_open", g_batchOpen ? 1 : 0);
    GlobalVariableSet(BatchKey() + "_start", (double)g_batchStart);
    GlobalVariableSet(BatchKey() + "_last", g_lastBatchPL);
+   GlobalVariableSet(BatchKey() + "_risk", g_batchRisk);
+   GlobalVariableSet(BatchKey() + "_mode", (double)InpMode);
   }
 
 void LoadBatch()
   {
-   g_batchSize = InpBatchStart;
+   g_batchSize = ModeStart();
    if(MQLInfoInteger(MQL_TESTER) || !GlobalVariableCheck(BatchKey() + "_size"))
       return;
    g_batchSize   = (int)GlobalVariableGet(BatchKey() + "_size");
@@ -511,7 +524,11 @@ void LoadBatch()
    g_batchOpen   = GlobalVariableGet(BatchKey() + "_open") > 0;
    g_batchStart  = (datetime)(long)GlobalVariableGet(BatchKey() + "_start");
    g_lastBatchPL = GlobalVariableGet(BatchKey() + "_last");
-   g_batchSize   = MathMax(InpBatchStart, MathMin(g_batchSize, InpBatchMax));
+   g_batchRisk   = GlobalVariableCheck(BatchKey() + "_risk") ? GlobalVariableGet(BatchKey() + "_risk") : 0;
+   // a different mode than last time starts again from that mode's first size
+   if(!GlobalVariableCheck(BatchKey() + "_mode") || (int)GlobalVariableGet(BatchKey() + "_mode") != (int)InpMode)
+      g_batchSize = ModeStart();
+   g_batchSize   = MathMax(ModeStart(), MathMin(g_batchSize, InpBatchMax));
   }
 
 // Net result of the batch: every closing deal of this EA on this symbol since the batch opened.
@@ -531,20 +548,33 @@ double BatchResult()
    return pl;
   }
 
-// A batch is finished when none of its positions is open: size up after a win, back to start after a loss.
+// A batch is finished when none of its positions is open. Its result decides the next size:
+//   win  (profit above 20% of the batch's risk)  -> Slow +1, Regular +2, Beast +5
+//   loss (loss beyond 20% of the batch's risk)   -> Slow -1, Regular -2, Beast back to 5
+//   about zero (breakeven exits, spread)         -> size unchanged: no increase on a 0 result
 void CheckBatchEnd()
   {
    if(!g_batchOpen || CountOurs() > 0 || TimeCurrent() - g_batchStart < BATCH_GRACE_SEC)
       return;
    g_lastBatchPL = BatchResult();
    g_batchOpen = false;
-   if(g_lastBatchPL > 0)
-      g_batchSize = MathMin(g_batchSize + InpBatchStep, InpBatchMax);
+   double neutral = MathMax(0.2 * g_batchRisk, 0.01);
+   string verdict;
+   if(g_lastBatchPL > neutral)
+     {
+      g_batchSize = MathMin(g_batchSize + ModeStep(), InpBatchMax);
+      verdict = "win";
+     }
+   else if(g_lastBatchPL < -neutral)
+     {
+      g_batchSize = (InpMode == BOTMODE_BEAST) ? ModeStart() : MathMax(ModeStart(), g_batchSize - ModeStep());
+      verdict = "loss";
+     }
    else
-      g_batchSize = InpBatchStart;
+      verdict = "about zero, size kept";
    SaveBatch();
-   Msg(StringFormat("Batch %d closed %+.2f: next batch %d positions", g_batchId, g_lastBatchPL, g_batchSize),
-       g_lastBatchPL > 0 ? CLR_GREEN : CLR_RED);
+   Msg(StringFormat("Batch %d %+.2f (%s): next batch %d", g_batchId, g_lastBatchPL, verdict, g_batchSize),
+       verdict == "win" ? CLR_GREEN : (verdict == "loss" ? CLR_RED : CLR_MUTED));
   }
 
 // Opens the batch: all positions share the structure stop and the R-multiple target.
@@ -576,7 +606,7 @@ bool OpenBatch(const int dir, const double stopPrice, const string why)
       g_lastSignal = StringFormat("%s skipped: spread %.2f too wide", why, spread);
       return false;
      }
-   double tpPrice = entry + dir * InpRewardR * dist;
+   double tpPrice = entry + dir * REWARD_R * dist;
 
    // batch size, trimmed so the whole batch never risks more than InpMaxBatchRiskPct of the balance
    int n = MathMin(g_batchSize, InpBatchMax);
@@ -598,6 +628,7 @@ bool OpenBatch(const int dir, const double stopPrice, const string why)
    g_batchId++;
    g_batchStart = TimeCurrent();
    g_batchSL = stopPrice;  g_batchTP = tpPrice;  g_batchDist = dist;  g_batchRiskPos = riskPerPos;  g_batchWhy = why;
+   g_batchRisk = riskPerPos * n;
    // fire every order of the batch at once (no waiting for each confirmation), so all positions
    // fill within about a second at nearly the same price
    int opened = 0;
@@ -618,6 +649,7 @@ bool OpenBatch(const int dir, const double stopPrice, const string why)
       return false;
      }
    g_batchOpen = true;
+   g_batchRisk = riskPerPos * opened;
    SaveBatch();
    g_lastSignal = StringFormat("%s: %s %d x %.2f, stop %s, target %s", why, dir > 0 ? "BUY" : "SELL", opened, InpLot,
                                DoubleToString(stopPrice, _Digits), DoubleToString(tpPrice, _Digits));
@@ -683,7 +715,7 @@ int OnInit()
    ArrayInitialize(g_rowTicket, 0);
    ChartSetInteger(0, CHART_FOREGROUND, false);
    ChartSetInteger(0, CHART_SHOW_ONE_CLICK, false);
-   if(InpLot <= 0 || InpBatchStart < 1 || InpBatchMax < InpBatchStart || InpRewardR <= 0 || InpSwingBars < 1)
+   if(InpLot <= 0 || InpBatchMax < ModeStart() || InpSwingBars < 1)
      {
       Print("XAUScalper: check the inputs");
       return INIT_PARAMETERS_INCORRECT;
@@ -1053,9 +1085,26 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
       MqlTick tk;
       SymbolInfoTick(_Symbol, tk);
       int d = (HistoryDealGetInteger(trans.deal, DEAL_TYPE) == DEAL_TYPE_BUY) ? 1 : -1;
+      // strict 1:2: target = 2 x the real distance from the fill to the stop
+      long pid = HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+      if(PositionSelectByTicket((ulong)pid))
+        {
+         double fill = PositionGetDouble(POSITION_PRICE_OPEN);
+         double sl   = PositionGetDouble(POSITION_SL) > 0 ? PositionGetDouble(POSITION_SL) : g_batchSL;
+         if(sl > 0 && d * (fill - sl) > 0)
+           {
+            double tp = fill + d * REWARD_R * (d * (fill - sl));
+            if(MathAbs(PositionGetDouble(POSITION_TP) - tp) > _Point || PositionGetDouble(POSITION_SL) == 0)
+              {
+               string err;
+               if(!g_exec.SetSLTP((ulong)pid, sl, tp, err))
+                  Print(err);
+              }
+           }
+        }
       JournalOpen(HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID), d, "STRUCTURE", g_batchWhy,
                   HistoryDealGetDouble(trans.deal, DEAL_VOLUME), HistoryDealGetDouble(trans.deal, DEAL_PRICE),
-                  tk.ask - tk.bid, g_batchDist, InpRewardR * g_batchDist, 0, g_batchRiskPos, 0, 0,
+                  tk.ask - tk.bid, g_batchDist, REWARD_R * g_batchDist, 0, g_batchRiskPos, 0, 0,
                   "batch " + IntegerToString(g_batchId));
       return;
      }
@@ -1239,7 +1288,7 @@ void BuildPanel()
    MkRect("bg",     0, 0, PANEL_W, PANEL_H, CLR_BG, CLR_BORDER);
    MkRect("header", 0, 0, PANEL_W, 36, CLR_HEADER, CLR_BORDER);
    MkLabel("title", 14, 9, IsBtc() ? "BTC SCALPER" : "XAU SCALPER", CLR_TEXT, 12, "Arial Bold");
-   MkLabel("mode", 150, 12, "MARKET STRUCTURE (" + TFName(InpStructureTF) + " + TICKS)", CLR_BLUE, 8, "Arial Bold");
+   MkLabel("mode", 150, 12, ModeName() + " MODE | " + TFName(InpStructureTF) + " STRUCTURE + TICKS", CLR_BLUE, 8, "Arial Bold");
    MkRect("pill", PANEL_W - 118, 8, 106, 20, CLR_GREY, CLR_GREY);
    MkLabel("pill_t", PANEL_W - 65, 18, "STOPPED", clrWhite, 8, "Arial Bold", ANCHOR_CENTER);
    MkButton("b_min", PANEL_W - 146, 8, 22, 20, "-", CLR_GREY, clrWhite, 10);
@@ -1312,7 +1361,7 @@ void UpdatePanel()
    SetText("s_v1", DoubleToString(eq, 2) + " " + cur, CLR_TEXT);
    SetText("s_v2", Signed(g_risk.DayPL()), PLColor(g_risk.DayPL()));
    SetText("s_v3", Signed(openPL), PLColor(openPL));
-   SetText("s_v4", IntegerToString(g_batchSize) + " x " + DoubleToString(InpLot, 2), CLR_TEXT);
+   SetText("s_v4", ModeName() + ": " + IntegerToString(g_batchSize) + " x " + DoubleToString(InpLot, 2), CLR_TEXT);
    string news = g_newsStatus;
    if(news == "" && g_newsTime > 0)
      {

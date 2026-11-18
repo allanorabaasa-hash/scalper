@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Keeps MT5 running whenever the internet is available.
 #  1. waits until the internet works
-#  2. starts MT5 (scripts/start.sh), which reopens the chart with the EA
-#  3. every 60 s: if MT5 is not running and the internet is up, starts it again
+#  2. starts every MT5 terminal (scripts/start.sh: account 1 and the Acc<N> copies), which
+#     reopen their charts with the EA
+#  3. every 60 s: if any terminal is not running and the internet is up, starts it again
 # The EA itself (input "Auto-start") begins trading once MT5 is connected.
 #
 # Runs at login via ~/.config/autostart/xauscalper.desktop (scripts/install-autostart.sh).
@@ -21,7 +22,6 @@ online() {
     || curl -s --max-time 5 -o /dev/null https://www.google.com
 }
 
-mt5_running() { pgrep -f "terminal64.exe" >/dev/null 2>&1; }
 
 # Only one watchdog at a time
 exec 9>"/tmp/xauscalper-autostart.lock"
@@ -38,10 +38,8 @@ while true; do
   if online; then
     [ "$was_online" -eq 0 ] && log "internet is back"
     was_online=1
-    if ! mt5_running; then
-      log "MT5 not running: starting it"
-      "$REPO_DIR/scripts/start.sh" >> "$LOG" 2>&1
-    fi
+    # starts any account terminal that is not running (all of them after login)
+    "$REPO_DIR/scripts/start.sh" 2>&1 | grep -v "already running" | while read -r l; do log "$l"; done
   else
     [ "$was_online" -eq 1 ] && log "no internet: waiting"
     was_online=0
