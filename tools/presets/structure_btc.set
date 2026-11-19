@@ -1,8 +1,7 @@
-; XAUScalper v17.20 market structure - BITCOIN: test on BTCUSDm
+; XAUScalper v18.00 market structure - BITCOIN: test on BTCUSDm
 InpStructureTF=1
 InpSwingBars=3
-InpFreshBars=3
-InpMaxChaseR=0.5
+InpPullbackPct=50
 InpSmartExit=true
 InpMinStopPct=0.03
 InpMaxStopPct=0.40

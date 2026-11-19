@@ -4,7 +4,7 @@ MetaTrader 5 Expert Advisor for **gold (XAUUSD) and bitcoin (BTCUSD)** that trad
 structure only, no indicators**, with an on-chart control panel. Runs on Kali Linux through a portable Wine staging build.
 Previous strategies are in git history only.
 
-## Strategy (v17.20): M1 market structure + real ticks
+## Strategy (v18.00): M1 market structure, pullback entries + real ticks
 
 Everything is read on the **M1** chart, closed candles only, no indicators.
 
@@ -15,13 +15,18 @@ below the latest unbroken swing low a bearish break. A break against the current
 **shift** (change of character). Result: the current structure (UP / DOWN), when and where it
 last broke or shifted, and the swing behind that break.
 
-**Entries.**
-- **Fresh break / shift:** if the structure broke or shifted in the last 3 candles (also when
-  the bot is just attached to a chart that has already shifted), it trades it at once, as long
-  as price has not run more than 0.5 x the stop past the broken level. Stop beyond the swing
-  behind the break.
-- **Continuation:** in an UP structure, the swing high made by the pullback after the break is
-  armed; the live tick that breaks it triggers the buy, stop below the pullback's low. Mirrored.
+**Entries: pullbacks only, never chasing a break.**
+1. A break of structure (or a shift) sets the side; the move after it is the impulse.
+2. After a batch closes, only a break that happens **after** that close can be traded: no
+   re-entry on the same move, the bot waits for a clear new setup.
+3. It waits for the **pullback**: price gives back at least **50%** of the impulse (measured from
+   the swing that held before the break to the impulse's extreme) without breaking that swing.
+4. It waits for the **turn**: a closed candle in the trend's direction that closes beyond the
+   previous candle's high (buys) / low (sells), starting from the pullback zone.
+5. It enters on the next tick if the real ticks agree. Stop beyond the pullback's extreme.
+
+Swing points: on M1 the next candle often opens at a candle's extreme, so a newer candle may
+equal a swing's high/low; older candles must be strictly beyond it.
 
 **Real ticks (when available).** Before any entry, the ticks of the last 15 seconds must agree:
 at least 60% of the price-changing ticks in the trade's direction and price moved that way. If

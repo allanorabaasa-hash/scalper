@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "17.20"
+#property version   "18.00"
 #property description "Market structure only (no indicators), all on M1: break of structure / shift detection, live-tick"
 #property description "triggers confirmed by real tick flow when available. Modes: Slow (1 +/-1), Regular (2 +/-2), Beast (5, +5 / back to 5). R:R 1:2."
 
@@ -27,8 +27,7 @@ enum ENUM_BOT_MODE
 input group "Market structure"
 input ENUM_TIMEFRAMES InpStructureTF        = PERIOD_M1;     // Structure timeframe (everything is read on this chart)
 input int             InpSwingBars          = 3;             // Swing point = higher/lower than this many candles each side
-input int             InpFreshBars          = 3;             // A break / shift this many candles old or newer is still tradable
-input double          InpMaxChaseR          = 0.5;           // Fresh break: skip if price already ran more than this x the stop past the level
+input double          InpPullbackPct        = 50;            // Pullback entry: price must give back at least this % of the move after the break
 input bool            InpSmartExit          = true;          // Smart exit: target split in 3 parts (L1, L2, TP), see README
 input double          InpMinStopPct         = 0.03;          // Skip if the stop is closer than this % of price (gold ~$1.2)
 input double          InpMaxStopPct         = 0.40;          // Gold: skip if the stop is further than this % of price (~$16)
@@ -91,8 +90,8 @@ bool           g_collapsed    = false;
 int            g_bias         = 0;      // +1 H1 up structure, -1 down, 0 range / unclear
 string         g_biasText     = "-";
 double         g_eSH = 0, g_eSL = 0;    // latest swing high / low (panel)
-int            g_freshDir     = 0;      // a fresh break of structure / shift to trade at once
-double         g_freshLevel   = 0, g_freshStop = 0;
+datetime       g_lastBatchEnd = 0;      // after a batch closes, only a NEW break of structure can be traded
+double         g_zoneLevel    = 0;      // pullback zone edge (panel)
 string         g_block        = "";     // why no entry right now
 string         g_lastSignal   = "none yet";
 int            g_mode         = BOTMODE_BEAST;   // current mode and lot (panel or inputs)
@@ -328,8 +327,10 @@ bool ScanStructure(Structure &st, MqlRates &r[])
          bool hi = true, lo = true;
          for(int j = 1; j <= k; j++)
            {
-            if(r[s].high <= r[s - j].high || r[s].high <= r[s + j].high) hi = false;
-            if(r[s].low  >= r[s - j].low  || r[s].low  >= r[s + j].low)  lo = false;
+            // older candles must be strictly lower (higher for lows); newer ones may equal it
+            // (on M1 the next candle often opens at this candle's extreme)
+            if(r[s].high < r[s - j].high || r[s].high <= r[s + j].high) hi = false;
+            if(r[s].low  > r[s - j].low  || r[s].low  >= r[s + j].low)  lo = false;
            }
          if(hi) { st.sh = r[s].high;  st.shIdx = s;  st.shBroken = false; }
          if(lo) { st.sl = r[s].low;   st.slIdx = s;  st.slBroken = false; }
@@ -356,15 +357,22 @@ bool ScanStructure(Structure &st, MqlRates &r[])
    return true;
   }
 
-// Reads the chart (once per closed candle) and decides what the bot is waiting for:
-//   - fresh break: the structure broke (or shifted) in the last InpFreshBars candles -> trade it now
-//   - continuation: in an up structure the latest swing high, made by the pullback after the break,
-//     is armed; a live tick above it triggers the buy (stop below the pullback's low). Mirrored.
+// Reads the chart (once per closed candle) and decides what the bot is waiting for.
+// Pullback entries only; the bot never chases a break:
+//   1. a break of structure (or a shift) sets the side; the move after it is the impulse
+//   2. after the last batch closed, only a break that happened AFTER that close counts
+//      (no re-entry on the same move: wait for a clear new setup)
+//   3. wait for the pullback: price gives back at least InpPullbackPct of the impulse
+//      (measured from the protective swing behind the break to the impulse extreme) without
+//      breaking that swing
+//   4. wait for the turn: a closed candle in the trend's direction that closes beyond the
+//      previous candle's high (buys) / low (sells), starting from the pullback zone
+//   5. enter on the next tick if the real ticks agree; stop beyond the pullback's extreme
 void ReadChart()
   {
    Structure st;
    MqlRates r[];
-   g_bias = 0;  g_setupDir = 0;  g_freshDir = 0;
+   g_bias = 0;  g_setupDir = 0;  g_zoneLevel = 0;
    if(!ScanStructure(st, r))
      {
       g_biasText = "waiting for " + TFName(InpStructureTF) + " data";
@@ -382,35 +390,72 @@ void ReadChart()
    g_biasText = StringFormat("%s (%s %d candle%s ago at %s)", st.trend > 0 ? "UP" : "DOWN",
                              st.breakShift ? "shifted" : "broke", st.breakAge, st.breakAge == 1 ? "" : "s",
                              DoubleToString(st.breakLevel, _Digits));
-
-   if(st.breakAge <= InpFreshBars)
+   int d  = st.trend;
+   int ba = st.breakAge;
+   string side = d > 0 ? "UP" : "DOWN";
+   if(g_lastBatchEnd > 0 && r[ba].time <= g_lastBatchEnd)
      {
-      g_freshDir = st.breakDir;
-      g_freshLevel = st.breakLevel;
-      g_freshStop = st.protect;
+      g_setupWhy = side + ": batch closed on this move, waiting for a new break of structure";
+      return;
      }
-   if(st.trend > 0)
+   if(ba < 2)
      {
-      if(!st.shBroken && st.shIdx <= st.breakAge)    // swing high made by the pullback after the break
+      g_setupWhy = side + ": structure just broke, waiting for the pullback";
+      return;
+     }
+   // impulse extreme after the break
+   int    xi = ba;
+   double X  = d > 0 ? r[ba].high : r[ba].low;
+   for(int j = ba - 1; j >= 1; j--)
+      if(d > 0 ? r[j].high > X : r[j].low < X)
         {
-         double low = r[1].low;                        // pullback low since that swing high
-         for(int j = 2; j <= st.shIdx; j++)
-            low = MathMin(low, r[j].low);
-         g_setupDir = 1;  g_level = st.sh;  g_stopRef = low;
-         return;
+         X = d > 0 ? r[j].high : r[j].low;
+         xi = j;
         }
-      g_setupWhy = "UP structure: waiting for a pullback to form a swing high";
-      return;
-     }
-   if(!st.slBroken && st.slIdx <= st.breakAge)
+   if(xi <= 1)
      {
-      double high = r[1].high;
-      for(int j = 2; j <= st.slIdx; j++)
-         high = MathMax(high, r[j].high);
-      g_setupDir = -1;  g_level = st.sl;  g_stopRef = high;
+      g_setupWhy = side + ": the move is still running, waiting for the pullback";
       return;
      }
-   g_setupWhy = "DOWN structure: waiting for a pullback to form a swing low";
+   // deepest point of the pullback after the impulse extreme
+   int    pi = xi - 1;
+   double PB = d > 0 ? r[pi].low : r[pi].high;
+   for(int j = xi - 1; j >= 1; j--)
+      if(d > 0 ? r[j].low < PB : r[j].high > PB)
+        {
+         PB = d > 0 ? r[j].low : r[j].high;
+         pi = j;
+        }
+   double P    = st.protect;
+   double zone = X - (X - P) * InpPullbackPct / 100.0;     // price must reach this (both directions)
+   g_zoneLevel = zone;
+   if(d * (PB - zone) > 0)
+     {
+      g_setupWhy = StringFormat("%s: waiting for a pullback to %s", side, DoubleToString(zone, _Digits));
+      return;
+     }
+   if(d * (PB - P) <= 0)
+     {
+      g_setupWhy = side + ": pullback went through the protective swing, waiting";
+      return;
+     }
+   // the turn: a candle in the trend's direction closing beyond the previous candle, from the zone
+   bool turn = d > 0 ? (r[1].close > r[1].open && r[1].close > r[2].high && MathMin(r[1].low, r[2].low) <= zone)
+                     : (r[1].close < r[1].open && r[1].close < r[2].low && MathMax(r[1].high, r[2].high) >= zone);
+   if(!turn)
+     {
+      g_setupWhy = StringFormat("%s: in the pullback zone, waiting for a %s reversal candle", side, d > 0 ? "bullish" : "bearish");
+      return;
+     }
+   if(PB == g_lastTraded)
+     {
+      g_setupWhy = side + ": this pullback was already traded";
+      return;
+     }
+   g_setupDir = d;
+   g_level    = PB;                                         // identifies this pullback
+   g_stopRef  = PB;
+   g_setupWhy = "";
   }
 
 // Real tick flow over the last InpTickWindowSec seconds: share of price-changing ticks (bid)
@@ -582,6 +627,7 @@ void SaveBatch()
    GlobalVariableSet(BatchKey() + "_tp", g_batchTP);
    GlobalVariableSet(BatchKey() + "_smst", g_smStage);
    GlobalVariableSet(BatchKey() + "_sment", g_smEntry);
+   GlobalVariableSet(BatchKey() + "_end", (double)g_lastBatchEnd);
   }
 
 void LoadBatch()
@@ -599,6 +645,7 @@ void LoadBatch()
    g_batchTP     = GlobalVariableCheck(BatchKey() + "_tp") ? GlobalVariableGet(BatchKey() + "_tp") : 0;
    g_smStage     = GlobalVariableCheck(BatchKey() + "_smst") ? (int)GlobalVariableGet(BatchKey() + "_smst") : 0;
    g_smEntry     = GlobalVariableCheck(BatchKey() + "_sment") ? GlobalVariableGet(BatchKey() + "_sment") : 0;
+   g_lastBatchEnd = GlobalVariableCheck(BatchKey() + "_end") ? (datetime)(long)GlobalVariableGet(BatchKey() + "_end") : 0;
    // a different mode than last time starts again from that mode's first size
    if(!GlobalVariableCheck(BatchKey() + "_mode") || (int)GlobalVariableGet(BatchKey() + "_mode") != (int)g_mode)
       g_batchSize = ModeStart();
@@ -632,6 +679,8 @@ void CheckBatchEnd()
       return;
    g_lastBatchPL = BatchResult();
    g_batchOpen = false;
+   g_lastBatchEnd = TimeCurrent();
+   g_lastEntryBar = 0;                               // re-read the chart now
    double neutral = MathMax(0.2 * g_batchRisk, 0.01);
    string verdict;
    if(g_lastBatchPL > neutral)
@@ -1008,33 +1057,7 @@ void Engine()
       ReadChart();
       g_lastEntryBar = bar;
      }
-   MqlTick tk;
-   if(!SymbolInfoTick(_Symbol, tk))
-      return;
-   double px = tk.bid;
-   double buffer = (tk.ask - tk.bid) + px * 0.0002;
-
-   // 2a. a fresh break / shift that has not been traded: enter now if price has not run too far
-   if(g_freshDir != 0 && g_freshLevel != g_lastTraded)
-     {
-      double stop = g_freshStop - g_freshDir * buffer;
-      double risk = g_freshDir * (px - stop);
-      double chase = g_freshDir * (px - g_freshLevel);
-      if(risk > 0 && chase >= 0 && chase <= InpMaxChaseR * risk)
-        {
-         if(TickFlowConfirms(g_freshDir, g_tickText))
-           {
-            g_block = "";
-            g_lastTraded = g_freshLevel;
-            OpenBatch(g_freshDir, stop, StringFormat("%s fresh %s", TFName(InpStructureTF), g_freshDir > 0 ? "bullish break" : "bearish break"));
-            return;
-           }
-         g_block = "fresh break, ticks not confirming (" + g_tickText + ")";
-         return;
-        }
-     }
-
-   // 2b. continuation: the pullback's swing level is armed; trigger on the live tick
+   // 2. pullback setup confirmed on the last closed candle: enter if the real ticks agree
    if(g_setupDir == 0)
      {
       g_block = g_setupWhy;
@@ -1042,25 +1065,22 @@ void Engine()
      }
    if(g_level == g_lastTraded)
      {
-      g_block = "this level was already traded: waiting for a new pullback";
+      g_block = "this pullback was already traded";
       return;
      }
-   if(g_setupDir * (px - g_level) <= 0)
-     {
-      g_block = StringFormat("%s armed: waiting for price to break %s", g_setupDir > 0 ? "BUY" : "SELL",
-                             DoubleToString(g_level, _Digits));
+   MqlTick tk;
+   if(!SymbolInfoTick(_Symbol, tk))
       return;
-     }
    if(!TickFlowConfirms(g_setupDir, g_tickText))
      {
-      g_block = "level broken, ticks not confirming (" + g_tickText + ")";
+      g_block = "pullback setup ready, ticks not confirming (" + g_tickText + ")";
       return;
      }
-   double stop = (g_setupDir > 0) ? MathMin(g_stopRef, iLow(_Symbol, InpStructureTF, 0)) - buffer
-                                  : MathMax(g_stopRef, iHigh(_Symbol, InpStructureTF, 0)) + buffer;
+   double buffer = (tk.ask - tk.bid) + tk.bid * 0.0002;
+   double stop   = g_stopRef - g_setupDir * buffer;
    g_block = "";
    g_lastTraded = g_level;
-   OpenBatch(g_setupDir, stop, TFName(InpStructureTF) + " break of structure");
+   OpenBatch(g_setupDir, stop, TFName(InpStructureTF) + " pullback entry");
   }
 
 //==================================================================
