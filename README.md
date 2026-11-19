@@ -4,7 +4,7 @@ MetaTrader 5 Expert Advisor for **gold (XAUUSD) and bitcoin (BTCUSD)** that trad
 structure only, no indicators**, with an on-chart control panel. Runs on Kali Linux through a portable Wine staging build.
 Previous strategies are in git history only.
 
-## Strategy (v18.30): M1 market structure, pullback entries + real ticks
+## Strategy (v18.40): M1 market structure, pullback entries + real ticks
 
 Everything is read on the **M1** chart, closed candles only, no indicators.
 
@@ -54,6 +54,11 @@ sent at once so they fill within about a second. Input **Mode**:
 | Slow | 1 position | +1 | -1 (never below 1) |
 | Regular | 2 positions | +2 | -2 (never below 2) |
 | **Beast** (default) | 5 positions | +5 | back to 5 |
+
+**Daily target per mode:** Slow **5%**, Regular **10%**, Beast **15%** of the account's equity at
+the start of the broker's day (all symbols, closed + open). Once reached, no new batches until
+the next day; a batch that is open keeps its stops and partials. Inputs, 0 = off. The panel's
+DAY P/L tile shows the result against the target (e.g. `+8.20 / +15.00`).
 
 A batch that ends at about zero (breakeven exits, spread: within 20% of the batch's risk) is
 neither a win nor a loss: the size stays the same, it never increases on a 0 result. Max 20

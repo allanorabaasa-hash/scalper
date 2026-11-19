@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "18.30"
+#property version   "18.40"
 #property description "Market structure only (no indicators), all on M1: break of structure / shift detection, live-tick"
 #property description "triggers confirmed by real tick flow when available. Modes: Slow (1 +/-1), Regular (2 +/-2), Beast (5, +5 / back to 5). R:R 1:3, partials at TP1/TP2."
 
@@ -48,6 +48,9 @@ input group "Batches"
 input ENUM_BOT_MODE   InpMode               = BOTMODE_BEAST;    // Mode: Slow / Regular / Beast (also switchable on the panel)
 input double          InpLot                = 0.01;          // Lot size per position (also changeable on the panel)
 input int             InpBatchMax           = 20;            // Never more than this many positions in one batch
+input double          InpTargetSlow         = 5;             // Daily target, Slow mode: stop new batches at +this % of the day's start (0 = off)
+input double          InpTargetRegular      = 10;            // Daily target, Regular mode (%)
+input double          InpTargetBeast        = 15;            // Daily target, Beast mode (%)
 input double          InpMaxBatchRiskPct    = 15;            // Batch stop-loss risk at most this % of balance (fewer positions if needed; 0 = off)
 
 input group "News (MT5 economic calendar, live only)"
@@ -232,6 +235,11 @@ bool   IsBtc()         { return StringFind(_Symbol, "BTC") >= 0; }
 int    ModeStart()     { return g_mode == BOTMODE_SLOW ? 1 : (g_mode == BOTMODE_REGULAR ? 2 : 5); }
 int    ModeStep()      { return ModeStart(); }
 string ModeName()      { return g_mode == BOTMODE_SLOW ? "SLOW" : (g_mode == BOTMODE_REGULAR ? "REGULAR" : "BEAST"); }
+double TargetPct()     { return g_mode == BOTMODE_SLOW ? InpTargetSlow : (g_mode == BOTMODE_REGULAR ? InpTargetRegular : InpTargetBeast); }
+// Account result today (closed + open, all symbols) against the equity at the start of the broker's day.
+double DayResult()     { return g_risk.DayStartEquity() > 0 ? AccountInfoDouble(ACCOUNT_EQUITY) - g_risk.DayStartEquity() : 0; }
+double TargetMoney()   { return g_risk.DayStartEquity() * TargetPct() / 100.0; }
+bool   TargetReached() { return TargetPct() > 0 && g_risk.DayStartEquity() > 0 && DayResult() >= TargetMoney(); }
 // Bitcoin swings are about twice as wide as gold's in % terms
 double MaxStopPct()    { return IsBtc() ? InpMaxStopPctBtc : InpMaxStopPct; }
 
@@ -1060,6 +1068,13 @@ void Engine()
       FixBatchStops();
       return;                                     // one batch at a time
      }
+   // daily target of the mode (Slow 5%, Regular 10%, Beast 15%): done for the day once reached
+   if(TargetReached())
+     {
+      g_block = StringFormat("daily target %.0f%% reached (%s): no new batches until tomorrow", TargetPct(),
+                             Signed(DayResult()));
+      return;
+     }
 
    if(phase == 1)
      {
@@ -1543,7 +1558,7 @@ void BuildPanel()
    MkButton("b_min", PANEL_W - 146, 8, 22, 20, "-", CLR_GREY, clrWhite, 10);
    MkLabel("info", 14, 44, " ", CLR_MUTED, 8);
 
-   string titles[6] = {"BALANCE", "EQUITY", "DAY P/L", "OPEN P/L", "NEXT BATCH", "NEXT HIGH-IMPACT NEWS"};
+   string titles[6] = {"BALANCE", "EQUITY", "DAY P/L / TARGET", "OPEN P/L", "NEXT BATCH", "NEXT HIGH-IMPACT NEWS"};
    for(int i = 0; i < 6; i++)
      {
       int x = 14 + (i % 3) * 178;
@@ -1638,7 +1653,10 @@ void UpdatePanel()
    double openPL = OpenPL();
    SetText("s_v0", DoubleToString(bal, 2) + " " + cur, CLR_TEXT);
    SetText("s_v1", DoubleToString(eq, 2) + " " + cur, CLR_TEXT);
-   SetText("s_v2", Signed(g_risk.DayPL()), PLColor(g_risk.DayPL()));
+   if(TargetPct() > 0)
+      SetText("s_v2", Signed(DayResult()) + " / +" + DoubleToString(TargetMoney(), 2), TargetReached() ? CLR_GREEN : PLColor(DayResult()));
+   else
+      SetText("s_v2", Signed(DayResult()), PLColor(DayResult()));
    SetText("s_v3", Signed(openPL), PLColor(openPL));
    SetText("s_v4", ModeName() + ": " + IntegerToString(g_batchSize) + " x " + DoubleToString(g_lot, 2), CLR_TEXT);
    for(int m = 0; m < 3; m++)
