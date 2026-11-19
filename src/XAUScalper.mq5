@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "18.40"
+#property version   "18.50"
 #property description "Market structure only (no indicators), all on M1: break of structure / shift detection, live-tick"
 #property description "triggers confirmed by real tick flow when available. Modes: Slow (1 +/-1), Regular (2 +/-2), Beast (5, +5 / back to 5). R:R 1:3, partials at TP1/TP2."
 
@@ -696,16 +696,35 @@ void LoadBatch()
    g_batchSize   = MathMax(ModeStart(), MathMin(g_batchSize, InpBatchMax));
   }
 
-// Net result of the batch: every closing deal of this EA on this symbol since the batch opened.
+// Net result of the batch: all deals of the positions this EA opened on this symbol since the
+// batch opened (found by their opening deal, so stop / target closes count whatever their magic).
 double BatchResult()
   {
-   if(!HistorySelect(g_batchStart - 1, TimeCurrent() + 60))
+   if(!HistorySelect(g_batchStart - 60, TimeCurrent() + 60))
       return 0;
-   double pl = 0;
-   for(int i = 0; i < HistoryDealsTotal(); i++)
+   long ids[];
+   int  m = 0;
+   int  total = HistoryDealsTotal();
+   for(int i = 0; i < total; i++)
      {
       ulong d = HistoryDealGetTicket(i);
-      if(d == 0 || HistoryDealGetString(d, DEAL_SYMBOL) != _Symbol || HistoryDealGetInteger(d, DEAL_MAGIC) != InpMagic)
+      if(d == 0 || HistoryDealGetString(d, DEAL_SYMBOL) != _Symbol || HistoryDealGetInteger(d, DEAL_ENTRY) != DEAL_ENTRY_IN
+         || HistoryDealGetInteger(d, DEAL_MAGIC) != InpMagic || (datetime)HistoryDealGetInteger(d, DEAL_TIME) < g_batchStart - 5)
+         continue;
+      ArrayResize(ids, m + 1);
+      ids[m++] = HistoryDealGetInteger(d, DEAL_POSITION_ID);
+     }
+   double pl = 0;
+   for(int i = 0; i < total; i++)
+     {
+      ulong d = HistoryDealGetTicket(i);
+      if(d == 0)
+         continue;
+      long pid = HistoryDealGetInteger(d, DEAL_POSITION_ID);
+      bool mine = false;
+      for(int j = 0; j < m && !mine; j++)
+         mine = (ids[j] == pid);
+      if(!mine)
          continue;
       pl += HistoryDealGetDouble(d, DEAL_PROFIT) + HistoryDealGetDouble(d, DEAL_SWAP)
             + HistoryDealGetDouble(d, DEAL_COMMISSION) + HistoryDealGetDouble(d, DEAL_FEE);
@@ -898,20 +917,50 @@ void ManageSmartExit()
    string err;
 
    double TP1 = L1, TP2 = L2;
-
-   // stage 0 -> 1: TP1 touched, stops to entry
-   if(g_smStage == 0 && dir * (px - TP1) >= 0)
+   // best price since the batch opened, from the M1 candles + the live price: a TP1 / TP2 touch
+   // that happened while MT5 was offline or between ticks still counts
+   // (from the candle after the entry: the entry candle's extreme may come from before the entry)
+   static double seen = 0;                            // best live price seen during this batch
+   static int    seenBatch = -1;
+   if(seenBatch != g_batchId) { seen = px; seenBatch = g_batchId; }
+   if(dir * (px - seen) > 0) seen = px;
+   double best = seen;
+   double hl[];
+   datetime from = (datetime)(g_batchStart - g_batchStart % 60 + 60);
+   if(TimeCurrent() >= from)
      {
+      if(dir > 0 && CopyHigh(_Symbol, PERIOD_M1, from, TimeCurrent(), hl) > 0)
+         best = MathMax(best, hl[ArrayMaximum(hl)]);
+      if(dir < 0 && CopyLow(_Symbol, PERIOD_M1, from, TimeCurrent(), hl) > 0)
+         best = MathMin(best, hl[ArrayMinimum(hl)] + (q.ask - q.bid));
+     }
+
+   // stage 0 -> 1: TP1 touched, stops to entry. If the touch was missed and price is already
+   // back at or below the entry, the breakeven stop cannot be placed: close at market instead.
+   if(g_smStage == 0 && dir * (best - TP1) >= 0)
+     {
+      int moved = 0;
       for(int i = 0; i < n; i++)
          if(PositionSelectByTicket(tk[i]))
-            g_exec.MoveStop(tk[i], PositionGetDouble(POSITION_PRICE_OPEN), err);
+           {
+            double open = PositionGetDouble(POSITION_PRICE_OPEN);
+            if(dir * (px - open) > 0 && g_exec.MoveStop(tk[i], open, err))
+               moved++;
+            else if(PositionSelectByTicket(tk[i]) && dir * (open - PositionGetDouble(POSITION_SL)) > 0)
+              {
+               NoteCloseReason(tk[i], "TP1 touched, breakeven missed");
+               if(!g_exec.CloseAsync(tk[i], err))
+                  Print(err);
+              }
+           }
       g_smStage = 1;
       SaveBatch();
-      Msg("TP1 reached: all stops moved to entry (breakeven)", CLR_GREEN);
+      Msg(moved == n ? "TP1 reached: all stops moved to entry (breakeven)"
+                     : "TP1 was touched while offline: breakeven missed, closed at market", moved == n ? CLR_GREEN : CLR_AMBER);
       return;
      }
    // TP2 reached (from stage 1 or 2): close half, the rest's stop to TP1
-   if((g_smStage == 1 || g_smStage == 2) && dir * (px - TP2) >= 0)
+   if((g_smStage == 1 || g_smStage == 2) && dir * (best - TP2) >= 0)
      {
       int k = n / 2;
       for(int i = 0; i < k; i++)
@@ -921,7 +970,14 @@ void ManageSmartExit()
             Print(err);
         }
       for(int i = k; i < n; i++)
-         g_exec.MoveStop(tk[i], TP1, err);
+         if(dir * (px - TP1) > 0)
+            g_exec.MoveStop(tk[i], TP1, err);
+         else
+           {                                          // TP2 touch missed, price already back below TP1
+            NoteCloseReason(tk[i], "TP2 touched, back below TP1");
+            if(!g_exec.CloseAsync(tk[i], err))
+               Print(err);
+           }
       g_smStage = 3;
       SaveBatch();
       Msg(StringFormat("TP2: closed %d of %d, the rest's stop moved to TP1 (target TP3)", k, n), CLR_GREEN);

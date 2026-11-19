@@ -4,7 +4,7 @@ MetaTrader 5 Expert Advisor for **gold (XAUUSD) and bitcoin (BTCUSD)** that trad
 structure only, no indicators**, with an on-chart control panel. Runs on Kali Linux through a portable Wine staging build.
 Previous strategies are in git history only.
 
-## Strategy (v18.40): M1 market structure, pullback entries + real ticks
+## Strategy (v18.50): M1 market structure, pullback entries + real ticks
 
 Everything is read on the **M1** chart, closed candles only, no indicators.
 
@@ -81,6 +81,11 @@ TP2 are inputs.
    at breakeven.
 3. Price reaches **TP2**: half of the remaining positions close; the rest's stop moves to TP1.
 4. The remainder closes at **TP3**, or at **TP1** if price comes back.
+
+The partials are run by the EA (MT5 must be running). A TP1 / TP2 touch is judged on the best
+price reached since the batch opened (M1 candle highs/lows + live ticks), so a spike missed
+while MT5 was offline or between ticks still counts. If the breakeven move is missed and price
+is already back at the entry, the batch is closed at market instead of waiting for the stop.
 
 Example, buy batch of 5 at 100, stop 98 (TP1 101.4, TP2 104, TP3 106), result in R per position:
 straight to TP3 +13R; TP1, bounce, back to entry about +1.4R; TP1, bounce, TP2, TP3 about +9.4R; TP1,
