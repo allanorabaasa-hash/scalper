@@ -4,7 +4,7 @@ MetaTrader 5 Expert Advisor for **gold (XAUUSD) and bitcoin (BTCUSD)** that trad
 structure only, no indicators**, with an on-chart control panel. Runs on Kali Linux through a portable Wine staging build.
 Previous strategies are in git history only.
 
-## Strategy (v18.00): M1 market structure, pullback entries + real ticks
+## Strategy (v18.10): M1 market structure, pullback entries + real ticks
 
 Everything is read on the **M1** chart, closed candles only, no indicators.
 
@@ -58,20 +58,20 @@ is blue) and the **LOT** box with - / + (or type a lot and press Enter). Changes
 next batch, are remembered across restarts, and are per chart and per account. A value changed
 later in the EA's Inputs dialog takes over from the panel's.
 
-**Risk : reward is strictly 1 : 2.** After each fill the target is set to exactly 2 x the real
+**Risk : reward is strictly 1 : 3.** After each fill the target is set to exactly 3 x the real
 distance between the fill price and the stop.
 
-**Smart exit** (input *Smart exit*, on). The way from the batch's entry to its take profit is
-split in three parts: **L1** (1/3), **L2** (2/3) and **TP**.
-1. Price touches **L2**: every stop moves to its entry (breakeven).
-2. Price comes back to **L1**: half the positions close there; if price keeps going back to the
-   entry, the rest close at breakeven.
-3. Price goes back up to **L2**: half of the remaining positions close there.
-4. The rest closes at **L1** if price comes back again, or at **TP**.
+**Partial profits** (input *Smart exit*, on). TP1 = 1R, TP2 = 2R, TP3 = 3R (the target).
+1. Price touches **TP1**: every stop moves to its entry (breakeven).
+2. Price bounces back through TP1 (by 0.1R): **half** the positions close there; the rest stay
+   at breakeven.
+3. Price reaches **TP2**: half of the remaining positions close; the rest's stop moves to TP1.
+4. The remainder closes at **TP3**, or at **TP1** if price comes back.
 
-Example, buy batch of 5 at 100, stop 97, TP 106 (L1 102, L2 104): up to 104 (stops to 100),
-back to 102 (2 closed), up to 104 again (1 closed), then TP (last 2) or back to 102 (last 2).
-A single position cannot be halved: in Slow mode it is managed by the breakeven stop, L1 and TP.
+Example, buy batch of 5 at 100, stop 98 (TP1 102, TP2 104, TP3 106), result in R per position:
+straight to TP3 +13R; TP1, bounce, back to entry +1.7R; TP1, bounce, TP2, TP3 +9.7R; TP1,
+bounce, TP2, back to TP1 +5.7R; never reaches TP1 -5R. One position cannot be halved: in Slow
+mode it is managed by the stops (entry at TP1, TP1 at TP2) and the TP3 target.
 
 **News (high-impact USD, MT5 calendar).**
 - 15 min before a release: no new entries; positions in profit move their stop to breakeven.

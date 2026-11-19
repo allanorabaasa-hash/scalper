@@ -4,9 +4,9 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "18.00"
+#property version   "18.10"
 #property description "Market structure only (no indicators), all on M1: break of structure / shift detection, live-tick"
-#property description "triggers confirmed by real tick flow when available. Modes: Slow (1 +/-1), Regular (2 +/-2), Beast (5, +5 / back to 5). R:R 1:2."
+#property description "triggers confirmed by real tick flow when available. Modes: Slow (1 +/-1), Regular (2 +/-2), Beast (5, +5 / back to 5). R:R 1:3, partials at TP1/TP2."
 
 #include <XAUScalper\RiskManager.mqh>
 #include <XAUScalper\Execution.mqh>
@@ -22,7 +22,7 @@ enum ENUM_BOT_MODE
    BOTMODE_BEAST   = 2    // Beast: 5 positions, +5 after a win, back to 5 after a loss
   };
 
-#define REWARD_R 2.0   // risk : reward is strictly 1 : 2
+#define REWARD_R 3.0   // risk : reward is strictly 1 : 3 (TP1 = 1R, TP2 = 2R, TP3 = 3R)
 
 input group "Market structure"
 input ENUM_TIMEFRAMES InpStructureTF        = PERIOD_M1;     // Structure timeframe (everything is read on this chart)
@@ -802,16 +802,15 @@ void FixBatchStops()
      }
   }
 
-// Smart exit. The distance from the batch's entry to its take profit (2R) is split in 3 parts:
-//   L1 = 1/3 of the way (0.67R), L2 = 2/3 (1.33R), TP = the full target (2R).
-//   stage 0  stop at the structure stop, target TP. Price touches L2 -> every stop moves to its
-//            entry (breakeven)                                                      -> stage 1
-//   stage 1  price comes back to L1 -> close half of the positions                  -> stage 2
-//            (if it keeps falling to the entry, the rest close at breakeven on the server)
-//   stage 2  price goes back up to L2 -> close half of the remaining positions      -> stage 3
-//   stage 3  the remainder closes at L1 if price comes back again, or at TP (server)
-// Prices are the closing side (bid for buys, ask for sells). A single position cannot be halved:
-// it stays and is managed by the breakeven stop, L1 (stage 3) and TP.
+// Partial profits. Target = 3R (risk : reward 1 : 3), split in three: TP1 = 1R, TP2 = 2R, TP3 = 3R.
+//   stage 0  structure stop. Price touches TP1 -> every stop moves to its entry (breakeven)  -> 1
+//   stage 1  price bounces back through TP1 (by 0.1R) -> close HALF the positions; the rest stay
+//            at breakeven                                                                   -> 2
+//            price goes on to TP2 instead   -> close half, the rest's stop moves to TP1      -> 3
+//   stage 2  price goes on to TP2 -> close half of the remaining, the rest's stop to TP1   -> 3
+//   stage 3  the remainder closes at TP3 (server target) or at TP1 (server stop)
+// Prices are the closing side (bid for buys, ask for sells). One position cannot be halved:
+// it gets the breakeven stop at TP1, the stop at TP1 from TP2, and the TP3 target.
 void ManageSmartExit()
   {
    if(!InpSmartExit || !g_batchOpen)
@@ -854,55 +853,50 @@ void ManageSmartExit()
    double px = dir > 0 ? q.bid : q.ask;
    string err;
 
-   if(g_smStage == 0 && dir * (px - L2) >= 0)
+   double TP1 = L1, TP2 = L2;
+
+   // stage 0 -> 1: TP1 touched, stops to entry
+   if(g_smStage == 0 && dir * (px - TP1) >= 0)
      {
       for(int i = 0; i < n; i++)
          if(PositionSelectByTicket(tk[i]))
             g_exec.MoveStop(tk[i], PositionGetDouble(POSITION_PRICE_OPEN), err);
       g_smStage = 1;
       SaveBatch();
-      Msg("Smart exit: L2 reached, all stops moved to entry (breakeven)", CLR_GREEN);
+      Msg("TP1 reached: all stops moved to entry (breakeven)", CLR_GREEN);
       return;
      }
-   if(g_smStage == 1 && dir * (px - L1) <= 0)
+   // TP2 reached (from stage 1 or 2): close half, the rest's stop to TP1
+   if((g_smStage == 1 || g_smStage == 2) && dir * (px - TP2) >= 0)
      {
       int k = n / 2;
       for(int i = 0; i < k; i++)
         {
-         NoteCloseReason(tk[i], "smart exit: half at L1");
+         NoteCloseReason(tk[i], "partial at TP2");
+         if(!g_exec.CloseAsync(tk[i], err))
+            Print(err);
+        }
+      for(int i = k; i < n; i++)
+         g_exec.MoveStop(tk[i], TP1, err);
+      g_smStage = 3;
+      SaveBatch();
+      Msg(StringFormat("TP2: closed %d of %d, the rest's stop moved to TP1 (target TP3)", k, n), CLR_GREEN);
+      return;
+     }
+   // stage 1 -> 2: price bounces back through TP1, close half there
+   if(g_smStage == 1 && dir * (px - TP1) < -0.1 * risk)     // a real bounce, not a tick of noise
+     {
+      int k = n / 2;
+      for(int i = 0; i < k; i++)
+        {
+         NoteCloseReason(tk[i], "partial at TP1");
          if(!g_exec.CloseAsync(tk[i], err))
             Print(err);
         }
       g_smStage = 2;
       SaveBatch();
-      Msg(StringFormat("Smart exit: back to L1, closed %d of %d; the rest at breakeven or L2", k, n), CLR_AMBER);
+      Msg(StringFormat("Bounce at TP1: closed %d of %d, the rest at breakeven or TP2", k, n), CLR_AMBER);
       return;
-     }
-   if(g_smStage == 2 && dir * (px - L2) >= 0)
-     {
-      int k = n / 2;
-      for(int i = 0; i < k; i++)
-        {
-         NoteCloseReason(tk[i], "smart exit: half at L2");
-         if(!g_exec.CloseAsync(tk[i], err))
-            Print(err);
-        }
-      g_smStage = 3;
-      SaveBatch();
-      Msg(StringFormat("Smart exit: L2 again, closed %d of %d; the rest at L1 or TP", k, n), CLR_GREEN);
-      return;
-     }
-   if(g_smStage == 3 && dir * (px - L1) <= 0)
-     {
-      for(int i = 0; i < n; i++)
-        {
-         NoteCloseReason(tk[i], "smart exit: rest at L1");
-         if(!g_exec.CloseAsync(tk[i], err))
-            Print(err);
-        }
-      g_smStage = 4;
-      SaveBatch();
-      Msg(StringFormat("Smart exit: back to L1, closed the last %d", n), CLR_AMBER);
      }
   }
 
@@ -1571,14 +1565,14 @@ string SmartExitText()
       return "Batch open: waiting for the fills.";
    double risk = MathAbs(g_smEntry - g_batchSL);
    int    dir  = (g_batchSL < g_smEntry) ? 1 : -1;
-   double L1 = g_smEntry + dir * REWARD_R * risk / 3.0, L2 = g_smEntry + dir * 2.0 * REWARD_R * risk / 3.0;
-   string lv = "L1 " + DoubleToString(L1, 2) + "  L2 " + DoubleToString(L2, 2) + ": ";
+   double L1 = g_smEntry + dir * risk, L2 = g_smEntry + dir * 2.0 * risk;
+   string lv = "TP1 " + DoubleToString(L1, 2) + "  TP2 " + DoubleToString(L2, 2) + ": ";
    switch(g_smStage)
      {
-      case 0: return lv + "at L2 stops go to entry";
-      case 1: return lv + "stops at entry; half closes if back to L1";
-      case 2: return lv + "half closed; half of rest at L2";
-      case 3: return lv + "rest closes at L1 or TP";
+      case 0: return lv + "at TP1 stops go to entry";
+      case 1: return lv + "stops at entry; half closes on a bounce";
+      case 2: return lv + "half closed; half of rest at TP2";
+      case 3: return lv + "rest closes at TP3 or TP1";
      }
    return lv + "closing";
   }
