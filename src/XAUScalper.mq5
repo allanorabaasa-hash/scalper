@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "18.20"
+#property version   "18.30"
 #property description "Market structure only (no indicators), all on M1: break of structure / shift detection, live-tick"
 #property description "triggers confirmed by real tick flow when available. Modes: Slow (1 +/-1), Regular (2 +/-2), Beast (5, +5 / back to 5). R:R 1:3, partials at TP1/TP2."
 
@@ -28,6 +28,9 @@ input group "Market structure"
 input ENUM_TIMEFRAMES InpStructureTF        = PERIOD_M1;     // Structure timeframe (everything is read on this chart)
 input int             InpSwingBars          = 3;             // Swing point = higher/lower than this many candles each side
 input double          InpPullbackPct        = 50;            // Pullback entry: price must give back at least this % of the move after the break
+input double          InpMinMoveCandles     = 4;             // Real move only: the move must be at least this many average candles long
+input double          InpStopBufferCandles  = 0.5;           // Stop this many average candles beyond the pullback's extreme
+input int             InpRangeLookback      = 60;            // No buys within one average candle of the highest high of this many candles (sells mirrored)
 input double          InpTP1R               = 0.7;           // TP1 at this many times the stop distance
 input double          InpTP2R               = 2.0;           // TP2 at this many times the stop distance (TP3 = 3x)
 input bool            InpSmartExit          = true;          // Smart exit: target split in 3 parts (L1, L2, TP), see README
@@ -94,6 +97,7 @@ string         g_biasText     = "-";
 double         g_eSH = 0, g_eSL = 0;    // latest swing high / low (panel)
 datetime       g_lastBatchEnd = 0;      // after a batch closes, only a NEW break of structure can be traded
 double         g_zoneLevel    = 0;      // pullback zone edge (panel)
+double         g_avgRange     = 0;      // average candle size (high - low) of the last 20 closed candles
 string         g_block        = "";     // why no entry right now
 string         g_lastSignal   = "none yet";
 int            g_mode         = BOTMODE_BEAST;   // current mode and lot (panel or inputs)
@@ -392,6 +396,11 @@ void ReadChart()
    g_biasText = StringFormat("%s (%s %d candle%s ago at %s)", st.trend > 0 ? "UP" : "DOWN",
                              st.breakShift ? "shifted" : "broke", st.breakAge, st.breakAge == 1 ? "" : "s",
                              DoubleToString(st.breakLevel, _Digits));
+   // average candle size: the market's own measure of noise (price action, no indicator)
+   g_avgRange = 0;
+   for(int j = 1; j <= 20; j++)
+      g_avgRange += r[j].high - r[j].low;
+   g_avgRange /= 20.0;
    int d  = st.trend;
    int ba = st.breakAge;
    string side = d > 0 ? "UP" : "DOWN";
@@ -429,6 +438,13 @@ void ReadChart()
          pi = j;
         }
    double P    = st.protect;
+   // only real moves: a tiny break inside a range is ignored
+   if(g_avgRange > 0 && d * (X - P) < InpMinMoveCandles * g_avgRange)
+     {
+      g_setupWhy = StringFormat("%s: move too small (%.2f < %.0f candles): looks like a range", side, d * (X - P),
+                                InpMinMoveCandles);
+      return;
+     }
    double zone = X - (X - P) * InpPullbackPct / 100.0;     // price must reach this (both directions)
    g_zoneLevel = zone;
    if(d * (PB - zone) > 0)
@@ -452,6 +468,24 @@ void ReadChart()
    if(PB == g_lastTraded)
      {
       g_setupWhy = side + ": this pullback was already traded";
+      return;
+     }
+   // no buying at the top of the recent range, no selling at its bottom
+   int lb = MathMin(InpRangeLookback, ArraySize(r) - 1);
+   double hh = r[1].high, ll = r[1].low;
+   for(int j = 2; j <= lb; j++)
+     {
+      hh = MathMax(hh, r[j].high);
+      ll = MathMin(ll, r[j].low);
+     }
+   if(d > 0 && r[1].close >= hh - g_avgRange)
+     {
+      g_setupWhy = StringFormat("UP: too close to the %d-candle high %s, not buying the top", lb, DoubleToString(hh, _Digits));
+      return;
+     }
+   if(d < 0 && r[1].close <= ll + g_avgRange)
+     {
+      g_setupWhy = StringFormat("DOWN: too close to the %d-candle low %s, not selling the bottom", lb, DoubleToString(ll, _Digits));
       return;
      }
    g_setupDir = d;
@@ -1072,7 +1106,8 @@ void Engine()
       g_block = "pullback setup ready, ticks not confirming (" + g_tickText + ")";
       return;
      }
-   double buffer = (tk.ask - tk.bid) + tk.bid * 0.0002;
+   // stop beyond the pullback's extreme by spread + half an average candle (room for normal wicks)
+   double buffer = (tk.ask - tk.bid) + MathMax(InpStopBufferCandles * g_avgRange, tk.bid * 0.0002);
    double stop   = g_stopRef - g_setupDir * buffer;
    g_block = "";
    g_lastTraded = g_level;
