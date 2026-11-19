@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "18.10"
+#property version   "18.20"
 #property description "Market structure only (no indicators), all on M1: break of structure / shift detection, live-tick"
 #property description "triggers confirmed by real tick flow when available. Modes: Slow (1 +/-1), Regular (2 +/-2), Beast (5, +5 / back to 5). R:R 1:3, partials at TP1/TP2."
 
@@ -22,12 +22,14 @@ enum ENUM_BOT_MODE
    BOTMODE_BEAST   = 2    // Beast: 5 positions, +5 after a win, back to 5 after a loss
   };
 
-#define REWARD_R 3.0   // risk : reward is strictly 1 : 3 (TP1 = 1R, TP2 = 2R, TP3 = 3R)
+#define REWARD_R 3.0   // risk : reward is strictly 1 : 3 (TP1 = 0.7R, TP2 = 2R, TP3 = 3R)
 
 input group "Market structure"
 input ENUM_TIMEFRAMES InpStructureTF        = PERIOD_M1;     // Structure timeframe (everything is read on this chart)
 input int             InpSwingBars          = 3;             // Swing point = higher/lower than this many candles each side
 input double          InpPullbackPct        = 50;            // Pullback entry: price must give back at least this % of the move after the break
+input double          InpTP1R               = 0.7;           // TP1 at this many times the stop distance
+input double          InpTP2R               = 2.0;           // TP2 at this many times the stop distance (TP3 = 3x)
 input bool            InpSmartExit          = true;          // Smart exit: target split in 3 parts (L1, L2, TP), see README
 input double          InpMinStopPct         = 0.03;          // Skip if the stop is closer than this % of price (gold ~$1.2)
 input double          InpMaxStopPct         = 0.40;          // Gold: skip if the stop is further than this % of price (~$16)
@@ -802,7 +804,7 @@ void FixBatchStops()
      }
   }
 
-// Partial profits. Target = 3R (risk : reward 1 : 3), split in three: TP1 = 1R, TP2 = 2R, TP3 = 3R.
+// Partial profits. Target = 3R (risk : reward 1 : 3): TP1 = 0.7R, TP2 = 2R, TP3 = 3R (inputs).
 //   stage 0  structure stop. Price touches TP1 -> every stop moves to its entry (breakeven)  -> 1
 //   stage 1  price bounces back through TP1 (by 0.1R) -> close HALF the positions; the rest stay
 //            at breakeven                                                                   -> 2
@@ -845,8 +847,8 @@ void ManageSmartExit()
    if(risk <= 0)
       return;
    double T  = REWARD_R * risk;
-   double L1 = g_smEntry + dir * T / 3.0;
-   double L2 = g_smEntry + dir * 2.0 * T / 3.0;
+   double L1 = g_smEntry + dir * InpTP1R * risk;
+   double L2 = g_smEntry + dir * InpTP2R * risk;
    MqlTick q;
    if(!SymbolInfoTick(_Symbol, q))
       return;
@@ -1565,7 +1567,7 @@ string SmartExitText()
       return "Batch open: waiting for the fills.";
    double risk = MathAbs(g_smEntry - g_batchSL);
    int    dir  = (g_batchSL < g_smEntry) ? 1 : -1;
-   double L1 = g_smEntry + dir * risk, L2 = g_smEntry + dir * 2.0 * risk;
+   double L1 = g_smEntry + dir * InpTP1R * risk, L2 = g_smEntry + dir * InpTP2R * risk;
    string lv = "TP1 " + DoubleToString(L1, 2) + "  TP2 " + DoubleToString(L2, 2) + ": ";
    switch(g_smStage)
      {
