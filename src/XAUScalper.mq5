@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "18.50"
+#property version   "18.60"
 #property description "Market structure only (no indicators), all on M1: break of structure / shift detection, live-tick"
 #property description "triggers confirmed by real tick flow when available. Modes: Slow (1 +/-1), Regular (2 +/-2), Beast (5, +5 / back to 5). R:R 1:3, partials at TP1/TP2."
 
@@ -27,7 +27,9 @@ enum ENUM_BOT_MODE
 input group "Market structure"
 input ENUM_TIMEFRAMES InpStructureTF        = PERIOD_M1;     // Structure timeframe (everything is read on this chart)
 input int             InpSwingBars          = 3;             // Swing point = higher/lower than this many candles each side
-input double          InpPullbackPct        = 50;            // Pullback entry: price must give back at least this % of the move after the break
+input double          InpPullbackPct        = 38;            // Pullback entry: price must give back at least this % of the move after the break
+input int             InpEntryWindow        = 3;             // A confirmed pullback setup stays valid for this many candles
+input double          InpMaxChaseR          = 0.5;           // ...unless price has already run more than this x the stop past the turn candle
 input double          InpMinMoveCandles     = 4;             // Real move only: the move must be at least this many average candles long
 input double          InpStopBufferCandles  = 0.5;           // Stop this many average candles beyond the pullback's extreme
 input int             InpRangeLookback      = 60;            // No buys within one average candle of the highest high of this many candles (sells mirrored)
@@ -100,7 +102,9 @@ string         g_biasText     = "-";
 double         g_eSH = 0, g_eSL = 0;    // latest swing high / low (panel)
 datetime       g_lastBatchEnd = 0;      // after a batch closes, only a NEW break of structure can be traded
 double         g_zoneLevel    = 0;      // pullback zone edge (panel)
-double         g_avgRange     = 0;      // average candle size (high - low) of the last 20 closed candles
+double         g_avgRange     = 0;
+int            g_armBars      = 0;      // candles since the current setup was confirmed
+double         g_armClose     = 0;      // close of the turn candle (chase check)      // average candle size (high - low) of the last 20 closed candles
 string         g_block        = "";     // why no entry right now
 string         g_lastSignal   = "none yet";
 int            g_mode         = BOTMODE_BEAST;   // current mode and lot (panel or inputs)
@@ -486,12 +490,13 @@ void ReadChart()
       hh = MathMax(hh, r[j].high);
       ll = MathMin(ll, r[j].low);
      }
-   if(d > 0 && r[1].close >= hh - g_avgRange)
+   // ... but in a trend the recent high IS the impulse's own high: that is not a range top
+   if(d > 0 && hh > X + g_avgRange * 0.01 && r[1].close >= hh - g_avgRange)
      {
       g_setupWhy = StringFormat("UP: too close to the %d-candle high %s, not buying the top", lb, DoubleToString(hh, _Digits));
       return;
      }
-   if(d < 0 && r[1].close <= ll + g_avgRange)
+   if(d < 0 && ll < X - g_avgRange * 0.01 && r[1].close <= ll + g_avgRange)
      {
       g_setupWhy = StringFormat("DOWN: too close to the %d-candle low %s, not selling the bottom", lb, DoubleToString(ll, _Digits));
       return;
@@ -499,7 +504,23 @@ void ReadChart()
    g_setupDir = d;
    g_level    = PB;                                         // identifies this pullback
    g_stopRef  = PB;
+   g_armClose = r[1].close;
+   g_armBars  = 0;
    g_setupWhy = "";
+  }
+
+// After ReadChart: keep the previous setup armed if no new one was found and it is still fresh.
+void KeepArmed(const int prevDir, const double prevLevel, const double prevStop, const double prevClose, const int prevBars)
+  {
+   if(g_setupDir != 0 || prevDir == 0 || prevLevel == g_lastTraded || prevBars + 1 >= InpEntryWindow)
+      return;
+   if(g_bias != prevDir)
+      return;                                                // structure changed: setup is void
+   double px = iClose(_Symbol, InpStructureTF, 1);
+   if(prevDir * (px - prevStop) <= 0)
+      return;                                                // pullback extreme broken
+   g_setupDir = prevDir;  g_level = prevLevel;  g_stopRef = prevStop;  g_armClose = prevClose;
+   g_armBars  = prevBars + 1;
   }
 
 // Real tick flow over the last InpTickWindowSec seconds: share of price-changing ticks (bid)
@@ -1155,7 +1176,10 @@ void Engine()
    datetime bar = iTime(_Symbol, InpStructureTF, 0);
    if(bar != 0 && bar != g_lastEntryBar)
      {
+      int    pd = g_setupDir, pb = g_armBars;
+      double pl = g_level, ps = g_stopRef, pc = g_armClose;
       ReadChart();
+      KeepArmed(pd, pl, ps, pc, pb);
       g_lastEntryBar = bar;
      }
    // 2. pullback setup confirmed on the last closed candle: enter if the real ticks agree
@@ -1172,6 +1196,12 @@ void Engine()
    MqlTick tk;
    if(!SymbolInfoTick(_Symbol, tk))
       return;
+   double runAway = g_setupDir * (tk.bid - g_armClose);
+   if(runAway > InpMaxChaseR * MathAbs(g_armClose - g_stopRef))
+     {
+      g_block = "price already ran away from the setup: not chasing";
+      return;
+     }
    if(!TickFlowConfirms(g_setupDir, g_tickText))
      {
       g_block = "pullback setup ready, ticks not confirming (" + g_tickText + ")";

@@ -4,7 +4,7 @@ MetaTrader 5 Expert Advisor for **gold (XAUUSD) and bitcoin (BTCUSD)** that trad
 structure only, no indicators**, with an on-chart control panel. Runs on Kali Linux through a portable Wine staging build.
 Previous strategies are in git history only.
 
-## Strategy (v18.50): M1 market structure, pullback entries + real ticks
+## Strategy (v18.60): M1 market structure, pullback entries + real ticks
 
 Everything is read on the **M1** chart, closed candles only, no indicators.
 
@@ -19,11 +19,13 @@ last broke or shifted, and the swing behind that break.
 1. A break of structure (or a shift) sets the side; the move after it is the impulse.
 2. After a batch closes, only a break that happens **after** that close can be traded: no
    re-entry on the same move, the bot waits for a clear new setup.
-3. It waits for the **pullback**: price gives back at least **50%** of the impulse (measured from
+3. It waits for the **pullback**: price gives back at least **38%** of the impulse (measured from
    the swing that held before the break to the impulse's extreme) without breaking that swing.
 4. It waits for the **turn**: a closed candle in the trend's direction that closes beyond the
    previous candle's high (buys) / low (sells), starting from the pullback zone.
-5. It enters on the next tick if the real ticks agree. Stop beyond the pullback's extreme by the
+5. It enters on the next tick if the real ticks agree. A confirmed setup stays valid for **3
+   candles** (time for the tick check, or for MT5 to reconnect), unless price has already run
+   more than 0.5 x the stop past the turn candle (no chasing). Stop beyond the pullback's extreme by the
    spread + **half an average candle** (average high-low of the last 20 M1 candles), so normal
    wicks do not hit it.
 
@@ -31,7 +33,9 @@ Filters against ranges (candle sizes only, no indicators):
 - **Real moves only:** the move behind the setup must be at least **4 average candles** long;
   small breaks inside a sideways market are ignored.
 - **No buying the top / selling the bottom:** no buy within one average candle of the highest
-  high of the last **60** candles; no sell within one average candle of the lowest low.
+  high of the last **60** candles; no sell within one average candle of the lowest low. In a
+  trend the recent high is the impulse's own high, so this filter only applies when the high
+  is older than the current move (a real range top).
 
 Swing points: on M1 the next candle often opens at a candle's extreme, so a newer candle may
 equal a swing's high/low; older candles must be strictly beyond it.
