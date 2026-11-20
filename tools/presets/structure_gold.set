@@ -1,4 +1,4 @@
-; XAUScalper v18.60 market structure - GOLD: test on XAUUSDm
+; XAUScalper v19.00 market structure - GOLD: test on XAUUSDm
 InpStructureTF=1
 InpSwingBars=3
 InpPullbackPct=38

@@ -4,16 +4,17 @@ MetaTrader 5 Expert Advisor for **gold (XAUUSD) and bitcoin (BTCUSD)** that trad
 structure only, no indicators**, with an on-chart control panel. Runs on Kali Linux through a portable Wine staging build.
 Previous strategies are in git history only.
 
-## Strategy (v18.60): M1 market structure, pullback entries + real ticks
+## Strategy (v19.00): M1 market structure, pullback entries + real ticks
 
 Everything is read on the **M1** chart, closed candles only, no indicators.
 
-**Reading the chart.** On every closed candle (and as soon as the bot is attached) it scans the
-last 300 candles left to right like a trader: swing points are candles higher (lower) than the
-3 candles on each side; a close above the latest unbroken swing high is a bullish break, a close
-below the latest unbroken swing low a bearish break. A break against the current structure is a
-**shift** (change of character). Result: the current structure (UP / DOWN), when and where it
-last broke or shifted, and the swing behind that break.
+**Reading the chart: major structure.** On every closed M1 candle the bot reads the last 300
+candles left to right like a trader. Swing points are candles higher (lower) than the 3 candles
+on each side. In an UP structure the impulse runs to its high; once a swing high forms there,
+the pullback has started; a close above that high is a continuation (break of structure) and
+the pullback's low becomes the **protected low**. Only a close below the protected low shifts
+the structure DOWN. Pullbacks, however deep and however many small swings they break, do not
+change the structure: they are what the bot trades. DOWN is mirrored.
 
 **Entries: pullbacks only, never chasing a break.**
 1. A break of structure (or a shift) sets the side; the move after it is the impulse.

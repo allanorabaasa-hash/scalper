@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "18.60"
+#property version   "19.00"
 #property description "Market structure only (no indicators), all on M1: break of structure / shift detection, live-tick"
 #property description "triggers confirmed by real tick flow when available. Modes: Slow (1 +/-1), Regular (2 +/-2), Beast (5, +5 / back to 5). R:R 1:3, partials at TP1/TP2."
 
@@ -306,70 +306,131 @@ string TakeCloseReason(const long position)
 //==================================================================
 //  MARKET STRUCTURE (closed candles only, no indicators)
 //==================================================================
-// The chart is scanned from the oldest of LOOKBACK candles to the newest, like a trader
-// reading it left to right:
-//   - a swing high is a candle whose high is above InpSwingBars candles on each side (low mirrored);
-//     it is known InpSwingBars candles after it formed
-//   - a close above the latest unbroken swing high = bullish break; if the structure was down
-//     (or unknown) it is a SHIFT (change of character), otherwise a continuation (break of structure)
-//   - a close below the latest unbroken swing low = bearish break, mirrored
-// Result: the current structure, the last break (how many candles ago, which level), and the
-// protective swing behind it (the low that held before a bullish break), used as the stop.
+// MAJOR structure, read left to right over the last LOOKBACK closed candles like a trader:
+//   - swing point: a candle higher (lower) than InpSwingBars candles on each side; older candles
+//     must be strictly beyond it, newer ones may equal it (M1 candles often open at the extreme)
+//   - the first close beyond a swing sets the first structure
+//   - in an UP structure the impulse runs to its high X; once a swing high forms there the
+//     pullback has started. A close above X = continuation (break of structure); the pullback's
+//     low becomes the PROTECTED low. Only a close below the protected low shifts the structure
+//     DOWN. Pullbacks, however deep and however many small swings they break, do not.
+//   - DOWN mirrored.
 struct Structure
   {
    int    trend;        // +1 up, -1 down, 0 not known yet
    int    breakAge;     // candles since the last break (1 = the last closed candle)
    int    breakDir;
    bool   breakShift;   // the last break changed the structure
-   double breakLevel;   // the swing level that was broken
-   double protect;      // extreme of the leg before the break (stop reference)
-   double sh, sl;       // latest swing high / low
-   bool   shBroken, slBroken;
-   int    shIdx, slIdx; // their candle index (series: 1 = last closed)
+   double breakLevel;   // the level that was broken
+   double protect;      // protected swing: the structure only changes if price closes beyond it
+   double sh, sl;       // panel: latest swing high / low
+   double x;            // impulse extreme since the last break
+   int    xIdx;
+   bool   locked;       // a swing formed at the impulse extreme: the pullback has started
   };
+
+bool IsSwingHigh(MqlRates &r[], const int s, const int k)
+  {
+   for(int j = 1; j <= k; j++)
+      if(r[s].high < r[s - j].high || r[s].high <= r[s + j].high)
+         return false;
+   return true;
+  }
+
+bool IsSwingLow(MqlRates &r[], const int s, const int k)
+  {
+   for(int j = 1; j <= k; j++)
+      if(r[s].low > r[s - j].low || r[s].low >= r[s + j].low)
+         return false;
+   return true;
+  }
+
+double LowestLow(MqlRates &r[], const int from, const int to)
+  {
+   double v = r[from].low;
+   for(int j = from; j <= to; j++)
+      v = MathMin(v, r[j].low);
+   return v;
+  }
+
+double HighestHigh(MqlRates &r[], const int from, const int to)
+  {
+   double v = r[from].high;
+   for(int j = from; j <= to; j++)
+      v = MathMax(v, r[j].high);
+   return v;
+  }
 
 bool ScanStructure(Structure &st, MqlRates &r[])
   {
    st.trend = 0;  st.breakAge = 0;  st.breakDir = 0;  st.breakShift = false;  st.breakLevel = 0;  st.protect = 0;
-   st.sh = 0;  st.sl = 0;  st.shBroken = true;  st.slBroken = true;  st.shIdx = 0;  st.slIdx = 0;
+   st.sh = 0;  st.sl = 0;  st.x = 0;  st.xIdx = 0;  st.locked = false;
    ArraySetAsSeries(r, true);
    int n = CopyRates(_Symbol, InpStructureTF, 0, LOOKBACK, r);
    int k = InpSwingBars;
    if(n < 4 * k + 20)
       return false;
+   double sh = 0, sl = 0;
+   int    shI = 0, slI = 0;
+   bool   shB = true, slB = true;
    for(int i = n - k - 2; i >= 1; i--)               // chronological: old -> new, closed candles only
      {
-      int s = i + k;                                  // candle that becomes a confirmed swing at i
-      if(s + k < n)
+      int  s   = i + k;                               // candle confirmed as a swing at i
+      bool swH = (s + k < n) && IsSwingHigh(r, s, k);
+      bool swL = (s + k < n) && IsSwingLow(r, s, k);
+      if(swH) { st.sh = r[s].high; }
+      if(swL) { st.sl = r[s].low; }
+
+      if(st.trend == 0)                               // first structure: first close beyond a swing
         {
-         bool hi = true, lo = true;
-         for(int j = 1; j <= k; j++)
+         if(swH) { sh = r[s].high;  shI = s;  shB = false; }
+         if(swL) { sl = r[s].low;   slI = s;  slB = false; }
+         if(!shB && r[i].close > sh)
            {
-            // older candles must be strictly lower (higher for lows); newer ones may equal it
-            // (on M1 the next candle often opens at this candle's extreme)
-            if(r[s].high < r[s - j].high || r[s].high <= r[s + j].high) hi = false;
-            if(r[s].low  > r[s - j].low  || r[s].low  >= r[s + j].low)  lo = false;
+            st.trend = 1;  st.breakShift = true;  st.breakLevel = sh;  st.protect = LowestLow(r, i, shI);
+            st.breakAge = i;  st.breakDir = 1;  st.x = r[i].high;  st.xIdx = i;  st.locked = false;
            }
-         if(hi) { st.sh = r[s].high;  st.shIdx = s;  st.shBroken = false; }
-         if(lo) { st.sl = r[s].low;   st.slIdx = s;  st.slBroken = false; }
+         else if(!slB && r[i].close < sl)
+           {
+            st.trend = -1;  st.breakShift = true;  st.breakLevel = sl;  st.protect = HighestHigh(r, i, slI);
+            st.breakAge = i;  st.breakDir = -1;  st.x = r[i].low;  st.xIdx = i;  st.locked = false;
+           }
+         continue;
         }
-      if(!st.shBroken && st.sh > 0 && r[i].close > st.sh)
+
+      if(st.trend > 0)
         {
-         double low = r[i].low;                        // lowest point of the leg that broke out
-         for(int j = i + 1; j <= st.shIdx && j < n; j++)
-            low = MathMin(low, r[j].low);
-         st.breakShift = (st.trend <= 0);
-         st.trend = 1;  st.breakDir = 1;  st.breakAge = i;  st.breakLevel = st.sh;  st.protect = low;
-         st.shBroken = true;
+         if(!st.locked && r[i].high >= st.x) { st.x = r[i].high;  st.xIdx = i; }
+         if(!st.locked && swH && s == st.xIdx)
+            st.locked = true;                         // swing high at the impulse top: pullback started
+         if(st.locked && r[i].close > st.x)
+           {                                          // continuation: pullback's low becomes protected
+            st.protect = LowestLow(r, i, st.xIdx);  st.breakLevel = st.x;  st.breakShift = false;
+            st.breakAge = i;  st.breakDir = 1;  st.x = r[i].high;  st.xIdx = i;  st.locked = false;
+           }
+         else if(r[i].close < st.protect)
+           {                                          // shift DOWN: the up-move's high is protected
+            st.breakLevel = st.protect;  st.protect = HighestHigh(r, i, st.xIdx);  st.trend = -1;
+            st.breakShift = true;  st.breakAge = i;  st.breakDir = -1;  st.x = r[i].low;  st.xIdx = i;
+            st.locked = false;
+           }
         }
-      else if(!st.slBroken && st.sl > 0 && r[i].close < st.sl)
+      else
         {
-         double high = r[i].high;
-         for(int j = i + 1; j <= st.slIdx && j < n; j++)
-            high = MathMax(high, r[j].high);
-         st.breakShift = (st.trend >= 0);
-         st.trend = -1;  st.breakDir = -1;  st.breakAge = i;  st.breakLevel = st.sl;  st.protect = high;
-         st.slBroken = true;
+         if(!st.locked && r[i].low <= st.x) { st.x = r[i].low;  st.xIdx = i; }
+         if(!st.locked && swL && s == st.xIdx)
+            st.locked = true;
+         if(st.locked && r[i].close < st.x)
+           {
+            st.protect = HighestHigh(r, i, st.xIdx);  st.breakLevel = st.x;  st.breakShift = false;
+            st.breakAge = i;  st.breakDir = -1;  st.x = r[i].low;  st.xIdx = i;  st.locked = false;
+           }
+         else if(r[i].close > st.protect)
+           {
+            st.breakLevel = st.protect;  st.protect = LowestLow(r, i, st.xIdx);  st.trend = 1;
+            st.breakShift = true;  st.breakAge = i;  st.breakDir = 1;  st.x = r[i].high;  st.xIdx = i;
+            st.locked = false;
+           }
         }
      }
    return true;

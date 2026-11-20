@@ -1,4 +1,4 @@
-; XAUScalper v18.60 market structure - BITCOIN: test on BTCUSDm
+; XAUScalper v19.00 market structure - BITCOIN: test on BTCUSDm
 InpStructureTF=1
 InpSwingBars=3
 InpPullbackPct=38
