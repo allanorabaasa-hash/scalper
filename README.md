@@ -31,9 +31,6 @@ change the structure: they are what the bot trades. DOWN is mirrored.
    wicks do not hit it.
 
 Filters against ranges (candle sizes only, no indicators):
-- **Spike filter:** if the move behind a setup contains a candle **4x** the normal size (the
-  average candle of the 20 candles before the move), it is a news / liquidation spike, not a
-  trend: its pullbacks are not traded. The bot waits for a new break made of normal candles.
 - **Real moves only:** the move behind the setup must be at least **4 average candles** long;
   small breaks inside a sideways market are ignored.
 - **No trading spikes:** if the move contains a candle more than **4x** the normal candle size
