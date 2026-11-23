@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "19.10"
+#property version   "19.20"
 #property description "Market structure only (no indicators), all on M1: break of structure / shift detection, live-tick"
 #property description "triggers confirmed by real tick flow when available. Modes: Slow (1 +/-1), Regular (2 +/-2), Beast (5, +5 / back to 5). R:R 1:3, partials at TP1/TP2."
 
@@ -32,6 +32,8 @@ input double          InpPullbackPct        = 38;            // Pullback entry: 
 input int             InpEntryWindow        = 3;             // A confirmed pullback setup stays valid for this many candles
 input double          InpMaxChaseR          = 0.5;           // ...unless price has already run more than this x the stop past the turn candle
 input double          InpMinMoveCandles     = 4;             // Real move only: the move must be at least this many average candles long
+input double          InpSpikeMult          = 4;             // Spike filter: no trades on a move with a candle this many times the normal size (0 = off)
+input int             InpSpikeCooldown      = 30;            // ...and none for this many candles after such a candle
 input double          InpStopBufferCandles  = 0.5;           // Stop this many average candles beyond the pullback's extreme
 input int             InpRangeLookback      = 60;            // No buys within one average candle of the highest high of this many candles (sells mirrored)
 input double          InpTP1R               = 0.7;           // TP1 at this many times the stop distance
@@ -493,6 +495,31 @@ void ReadChart()
      {
       g_setupWhy = side + ": batch closed on this move, waiting for a new break of structure";
       return;
+     }
+   // spike filter: a move made of abnormal candles (news, liquidations) is not a trend; its
+   // pullbacks tend to keep going. Normal size = average candle of the 50 candles before the move.
+   if(InpSpikeMult > 0)
+     {
+      int    nr = ArraySize(r);
+      double base = 0;
+      int    cnt = 0;
+      for(int j = ba + 1; j <= ba + 50 && j < nr; j++)
+        {
+         base += r[j].high - r[j].low;
+         cnt++;
+        }
+      if(cnt > 10)
+        {
+         base /= cnt;
+         int upto = MathMin(MathMax(ba, InpSpikeCooldown), nr - 1);
+         for(int j = 1; j <= upto; j++)
+            if(r[j].high - r[j].low > InpSpikeMult * base)
+              {
+               g_setupWhy = StringFormat("%s: spike %d candles ago (%.0fx normal size): waiting for normal structure",
+                                         side, j, (r[j].high - r[j].low) / base);
+               return;
+              }
+        }
      }
    if(ba < 2)
      {

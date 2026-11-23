@@ -4,7 +4,7 @@ MetaTrader 5 Expert Advisor for **gold (XAUUSD) and bitcoin (BTCUSD)** that trad
 structure only, no indicators**, with an on-chart control panel. Runs on Kali Linux through a portable Wine staging build.
 Previous strategies are in git history only.
 
-## Strategy (v19.10): M1 market structure, pullback entries + real ticks
+## Strategy (v19.20): M1 market structure, pullback entries + real ticks
 
 Everything is read on the **M1** chart, closed candles only, no indicators.
 
@@ -33,6 +33,10 @@ change the structure: they are what the bot trades. DOWN is mirrored.
 Filters against ranges (candle sizes only, no indicators):
 - **Real moves only:** the move behind the setup must be at least **4 average candles** long;
   small breaks inside a sideways market are ignored.
+- **No trading spikes:** if the move contains a candle more than **4x** the normal candle size
+  (the average of the 50 candles before the move), or one appeared in the last **30** candles,
+  the bot does not trade it: vertical news / liquidation spikes are not trends, and their
+  pullbacks tend to keep going. It waits for normal structure.
 - **No buying the top / selling the bottom:** no buy within one average candle of the highest
   high of the last **60** candles; no sell within one average candle of the lowest low. In a
   trend the recent high is the impulse's own high, so this filter only applies when the high
