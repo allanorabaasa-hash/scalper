@@ -4,7 +4,7 @@ MetaTrader 5 Expert Advisor for **gold (XAUUSD) and bitcoin (BTCUSD)** that trad
 structure only, no indicators**, with an on-chart control panel. Runs on Kali Linux through a portable Wine staging build.
 Previous strategies are in git history only.
 
-## Strategy (v19.00): M1 market structure, pullback entries + real ticks
+## Strategy (v19.10): M1 market structure, pullback entries + real ticks
 
 Everything is read on the **M1** chart, closed candles only, no indicators.
 
@@ -58,12 +58,15 @@ sent at once so they fill within about a second. Input **Mode**:
 |---|---|---|---|
 | Slow | 1 position | +1 | -1 (never below 1) |
 | Regular | 2 positions | +2 | -2 (never below 2) |
-| **Beast** (default) | 5 positions | +5 | back to 5 |
+| **Beast** | 5 positions | +5 | back to 5 |
 
-**Daily target per mode:** Slow **5%**, Regular **10%**, Beast **15%** of the account's equity at
+**Daily target per mode:** Slow **5%**, Regular **7%**, Beast **10%** of the account's equity at
 the start of the broker's day (all symbols, closed + open). Once reached, no new batches until
 the next day; a batch that is open keeps its stops and partials. Inputs, 0 = off. The panel's
 DAY P/L tile shows the result against the target (e.g. `+8.20 / +15.00`).
+
+Default mode (input *Mode* = Auto): **gold Slow, bitcoin Beast**, other symbols Regular. The
+panel buttons still switch it.
 
 A batch that ends at about zero (breakeven exits, spread: within 20% of the batch's risk) is
 neither a win nor a loss: the size stays the same, it never increases on a 0 result. Max 20
@@ -79,23 +82,17 @@ later in the EA's Inputs dialog takes over from the panel's.
 **Risk : reward is strictly 1 : 3.** After each fill the target is set to exactly 3 x the real
 distance between the fill price and the stop.
 
-**Partial profits** (input *Smart exit*, on). TP1 = 0.7R, TP2 = 2R, TP3 = 3R (the target); TP1 and
-TP2 are inputs.
-1. Price touches **TP1**: every stop moves to its entry (breakeven).
-2. Price bounces back through TP1 (by 0.1R): **half** the positions close there; the rest stay
-   at breakeven.
-3. Price reaches **TP2**: half of the remaining positions close; the rest's stop moves to TP1.
-4. The remainder closes at **TP3**, or at **TP1** if price comes back.
+**Partial profits, on the broker's server.** Each position of a batch gets its own take profit
+when it is opened: about **40% at TP1 (0.7R)**, **40% at TP2 (2R)**, the rest at **TP3 (3R)**
+(1 position: TP2; 2: TP1 + TP3; 5: 2 / 2 / 1; 10: 4 / 4 / 2). These close on the broker's
+server, so profits are taken even when the power, the PC, MT5 or the internet is off.
+While MT5 is online the bot also protects what is left: at TP1 every remaining stop moves to
+the entry; at TP2 to TP1. A touch missed while offline is caught up on reconnect (best price
+since entry); if price is already back past that level, the rest is closed at market.
 
-The partials are run by the EA (MT5 must be running). A TP1 / TP2 touch is judged on the best
-price reached since the batch opened (M1 candle highs/lows + live ticks), so a spike missed
-while MT5 was offline or between ticks still counts. If the breakeven move is missed and price
-is already back at the entry, the batch is closed at market instead of waiting for the stop.
-
-Example, buy batch of 5 at 100, stop 98 (TP1 101.4, TP2 104, TP3 106), result in R per position:
-straight to TP3 +13R; TP1, bounce, back to entry about +1.4R; TP1, bounce, TP2, TP3 about +9.4R; TP1,
-bounce, TP2, back to TP1 about +4.8R; never reaches TP1 -5R. One position cannot be halved: in Slow
-mode it is managed by the stops (entry at TP1, TP1 at TP2) and the TP3 target.
+Batch of 5, result in R per position: straight to TP3 **+8.4R**; reaches TP2 then back to the
+stop with MT5 offline **+4.4R** (online: +6.1R); reaches only TP1 then back to the stop offline
+**-1.6R** (online, at breakeven: +1.4R); never reaches TP1 **-5R**.
 
 **News (high-impact USD, MT5 calendar).**
 - 15 min before a release: no new entries; positions in profit move their stop to breakeven.

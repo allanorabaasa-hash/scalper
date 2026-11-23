@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "19.00"
+#property version   "19.10"
 #property description "Market structure only (no indicators), all on M1: break of structure / shift detection, live-tick"
 #property description "triggers confirmed by real tick flow when available. Modes: Slow (1 +/-1), Regular (2 +/-2), Beast (5, +5 / back to 5). R:R 1:3, partials at TP1/TP2."
 
@@ -19,7 +19,8 @@ enum ENUM_BOT_MODE
   {
    BOTMODE_SLOW    = 0,   // Slow: 1 position, +1 after a win, -1 after a loss
    BOTMODE_REGULAR = 1,   // Regular: 2 positions, +2 after a win, -2 after a loss
-   BOTMODE_BEAST   = 2    // Beast: 5 positions, +5 after a win, back to 5 after a loss
+   BOTMODE_BEAST   = 2,   // Beast: 5 positions, +5 after a win, back to 5 after a loss
+   BOTMODE_AUTO    = 3    // Auto: gold Slow, bitcoin Beast, others Regular
   };
 
 #define REWARD_R 3.0   // risk : reward is strictly 1 : 3 (TP1 = 0.7R, TP2 = 2R, TP3 = 3R)
@@ -47,12 +48,12 @@ input int             InpTickWindowSec      = 15;            // Look at the tick
 input double          InpTickMinRatio       = 60;            // At least this % of price-changing ticks in the trade's direction
 
 input group "Batches"
-input ENUM_BOT_MODE   InpMode               = BOTMODE_BEAST;    // Mode: Slow / Regular / Beast (also switchable on the panel)
+input ENUM_BOT_MODE   InpMode               = BOTMODE_AUTO;     // Mode: Slow / Regular / Beast (also switchable on the panel)
 input double          InpLot                = 0.01;          // Lot size per position (also changeable on the panel)
 input int             InpBatchMax           = 20;            // Never more than this many positions in one batch
 input double          InpTargetSlow         = 5;             // Daily target, Slow mode: stop new batches at +this % of the day's start (0 = off)
-input double          InpTargetRegular      = 10;            // Daily target, Regular mode (%)
-input double          InpTargetBeast        = 15;            // Daily target, Beast mode (%)
+input double          InpTargetRegular      = 7;             // Daily target, Regular mode (%)
+input double          InpTargetBeast        = 10;            // Daily target, Beast mode (%)
 input double          InpMaxBatchRiskPct    = 15;            // Batch stop-loss risk at most this % of balance (fewer positions if needed; 0 = off)
 
 input group "News (MT5 economic calendar, live only)"
@@ -177,9 +178,20 @@ string PrefKey()       { return StateKey() + "_pref_" + _Symbol; }
 
 // Mode and lot: the panel's choice is kept across restarts; a value changed in the inputs
 // dialog wins over it (the inputs it was chosen against are remembered).
+int DefaultMode()
+  {
+   if(InpMode != BOTMODE_AUTO)
+      return InpMode;
+   if(IsBtc())
+      return BOTMODE_BEAST;
+   if(StringFind(_Symbol, "XAU") >= 0 || StringFind(_Symbol, "GOLD") >= 0)
+      return BOTMODE_SLOW;
+   return BOTMODE_REGULAR;
+  }
+
 void LoadPrefs()
   {
-   g_mode = InpMode;
+   g_mode = DefaultMode();
    g_lot  = InpLot;
    if(MQLInfoInteger(MQL_TESTER))
       return;
@@ -845,7 +857,23 @@ void CheckBatchEnd()
        verdict == "win" ? CLR_GREEN : (verdict == "loss" ? CLR_RED : CLR_MUTED));
   }
 
-// Opens the batch: all positions share the structure stop and the R-multiple target.
+// Which take-profit level position i of n gets: about 40% at TP1, 40% at TP2, the rest at TP3.
+//   1 position: TP2.  2 positions: TP1 + TP3.  5: 2 x TP1, 2 x TP2, 1 x TP3.  10: 4 / 4 / 2.
+int TierFor(const int i, const int n)
+  {
+   if(n == 1)
+      return 2;
+   if(n == 2)
+      return i == 0 ? 1 : 3;
+   int k1 = (int)MathRound(n * 0.4), k2 = (int)MathRound(n * 0.4);
+   if(k1 + k2 >= n)
+      k2 = n - k1 - 1;
+   return i < k1 ? 1 : (i < k1 + k2 ? 2 : 3);
+  }
+
+double TierR(const int tier) { return tier == 1 ? InpTP1R : (tier == 2 ? InpTP2R : REWARD_R); }
+
+// Opens the batch: all positions share the structure stop; targets are staggered TP1 / TP2 / TP3.
 bool OpenBatch(const int dir, const double stopPrice, const string why)
   {
    MqlTick tk;
@@ -900,12 +928,16 @@ bool OpenBatch(const int dir, const double stopPrice, const string why)
    g_batchRisk = riskPerPos * n;
    // fire every order of the batch at once (no waiting for each confirmation), so all positions
    // fill within about a second at nearly the same price
+   // every position gets its own take profit ON THE BROKER'S SERVER (TP1 / TP2 / TP3), so the
+   // partial profits are taken even when MT5, the PC or the internet is off
    int opened = 0;
    string comment = InpTradeComment + ":B" + IntegerToString(g_batchId);
    for(int i = 0; i < n; i++)
      {
       string err;
-      if(!g_exec.OpenAsync(dir, g_lot, stopPrice, tpPrice, comment, err))
+      int    tier = TierFor(i, n);
+      double tpI  = entry + dir * TierR(tier) * dist;
+      if(!g_exec.OpenAsync(dir, g_lot, stopPrice, tpI, comment + ":T" + IntegerToString(tier), err))
         {
          Msg("Order failed: " + err, CLR_RED);
          break;
@@ -947,15 +979,14 @@ void FixBatchStops()
      }
   }
 
-// Partial profits. Target = 3R (risk : reward 1 : 3): TP1 = 0.7R, TP2 = 2R, TP3 = 3R (inputs).
-//   stage 0  structure stop. Price touches TP1 -> every stop moves to its entry (breakeven)  -> 1
-//   stage 1  price bounces back through TP1 (by 0.1R) -> close HALF the positions; the rest stay
-//            at breakeven                                                                   -> 2
-//            price goes on to TP2 instead   -> close half, the rest's stop moves to TP1      -> 3
-//   stage 2  price goes on to TP2 -> close half of the remaining, the rest's stop to TP1   -> 3
-//   stage 3  the remainder closes at TP3 (server target) or at TP1 (server stop)
-// Prices are the closing side (bid for buys, ask for sells). One position cannot be halved:
-// it gets the breakeven stop at TP1, the stop at TP1 from TP2, and the TP3 target.
+// Partial profits. Each position carries its own take profit ON THE SERVER: about 40% of the
+// batch at TP1 (0.7R), 40% at TP2 (2R), the rest at TP3 (3R): they close there even if MT5 is off.
+// While MT5 is online the EA also protects what is left:
+//   stage 0  TP1 touched -> every remaining stop moves to its entry (breakeven)             -> 1
+//   stage 1  TP2 touched -> every remaining stop moves to TP1                               -> 3
+// Touches are judged on the best price since the batch opened (M1 candles + live ticks), so a
+// spike missed while offline still counts; if price is already back past the new stop level,
+// the remaining positions are closed at market.
 void ManageSmartExit()
   {
    if(!InpSmartExit || !g_batchOpen)
@@ -1041,19 +1072,16 @@ void ManageSmartExit()
                      : "TP1 was touched while offline: breakeven missed, closed at market", moved == n ? CLR_GREEN : CLR_AMBER);
       return;
      }
-   // TP2 reached (from stage 1 or 2): close half, the rest's stop to TP1
-   if((g_smStage == 1 || g_smStage == 2) && dir * (best - TP2) >= 0)
+   // TP2 reached: the TP1 / TP2 positions have closed on the server; the rest's stop moves to TP1
+   if(g_smStage == 1 && dir * (best - TP2) >= 0)
      {
-      int k = n / 2;
-      for(int i = 0; i < k; i++)
-        {
-         NoteCloseReason(tk[i], "partial at TP2");
-         if(!g_exec.CloseAsync(tk[i], err))
-            Print(err);
-        }
-      for(int i = k; i < n; i++)
+      int moved = 0;
+      for(int i = 0; i < n; i++)
          if(dir * (px - TP1) > 0)
-            g_exec.MoveStop(tk[i], TP1, err);
+           {
+            if(g_exec.MoveStop(tk[i], TP1, err))
+               moved++;
+           }
          else
            {                                          // TP2 touch missed, price already back below TP1
             NoteCloseReason(tk[i], "TP2 touched, back below TP1");
@@ -1062,22 +1090,7 @@ void ManageSmartExit()
            }
       g_smStage = 3;
       SaveBatch();
-      Msg(StringFormat("TP2: closed %d of %d, the rest's stop moved to TP1 (target TP3)", k, n), CLR_GREEN);
-      return;
-     }
-   // stage 1 -> 2: price bounces back through TP1, close half there
-   if(g_smStage == 1 && dir * (px - TP1) < -0.1 * risk)     // a real bounce, not a tick of noise
-     {
-      int k = n / 2;
-      for(int i = 0; i < k; i++)
-        {
-         NoteCloseReason(tk[i], "partial at TP1");
-         if(!g_exec.CloseAsync(tk[i], err))
-            Print(err);
-        }
-      g_smStage = 2;
-      SaveBatch();
-      Msg(StringFormat("Bounce at TP1: closed %d of %d, the rest at breakeven or TP2", k, n), CLR_AMBER);
+      Msg(StringFormat("TP2 reached: stop of the last %d position(s) moved to TP1", n), CLR_GREEN);
       return;
      }
   }
@@ -1473,15 +1486,19 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
       MqlTick tk;
       SymbolInfoTick(_Symbol, tk);
       int d = (HistoryDealGetInteger(trans.deal, DEAL_TYPE) == DEAL_TYPE_BUY) ? 1 : -1;
-      // strict 1:2: target = 2 x the real distance from the fill to the stop
+      // target from the REAL fill: TP1 / TP2 / TP3 x the distance from the fill to the stop
       long pid = HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
       if(PositionSelectByTicket((ulong)pid))
         {
          double fill = PositionGetDouble(POSITION_PRICE_OPEN);
          double sl   = PositionGetDouble(POSITION_SL) > 0 ? PositionGetDouble(POSITION_SL) : g_batchSL;
+         string cm   = PositionGetString(POSITION_COMMENT);
+         if(StringFind(cm, ":T") < 0)
+            cm = HistoryDealGetString(trans.deal, DEAL_COMMENT);
+         double mult = StringFind(cm, ":T1") >= 0 ? InpTP1R : (StringFind(cm, ":T2") >= 0 ? InpTP2R : REWARD_R);
          if(sl > 0 && d * (fill - sl) > 0)
            {
-            double tp = fill + d * REWARD_R * (d * (fill - sl));
+            double tp = fill + d * mult * (d * (fill - sl));
             if(MathAbs(PositionGetDouble(POSITION_TP) - tp) > _Point || PositionGetDouble(POSITION_SL) == 0)
               {
                string err;
@@ -1768,10 +1785,10 @@ string SmartExitText()
    string lv = "TP1 " + DoubleToString(L1, 2) + "  TP2 " + DoubleToString(L2, 2) + ": ";
    switch(g_smStage)
      {
-      case 0: return lv + "at TP1 stops go to entry";
-      case 1: return lv + "stops at entry; half closes on a bounce";
-      case 2: return lv + "half closed; half of rest at TP2";
-      case 3: return lv + "rest closes at TP3 or TP1";
+      case 0: return lv + "TP1 / TP2 / TP3 on the server; at TP1 stops go to entry";
+      case 1: return lv + "stops at entry; next: TP2 (stops to TP1)";
+      case 2: return lv + "stops at entry; next: TP2 (stops to TP1)";
+      case 3: return lv + "stops at TP1; last ones target TP3";
      }
    return lv + "closing";
   }

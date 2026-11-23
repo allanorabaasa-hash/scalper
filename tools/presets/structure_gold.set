@@ -1,4 +1,4 @@
-; XAUScalper v19.00 market structure - GOLD: test on XAUUSDm
+; XAUScalper v19.10 market structure - GOLD: test on XAUUSDm
 InpStructureTF=1
 InpSwingBars=3
 InpPullbackPct=38
@@ -14,12 +14,12 @@ InpMinStopPct=0.03
 InpMaxStopPct=0.40
 InpMaxStopPctBtc=0.80
 InpMaxSpreadOfStop=25
-InpMode=2
+InpMode=3
 InpLot=0.01
 InpBatchMax=20
 InpTargetSlow=5
-InpTargetRegular=10
-InpTargetBeast=15
+InpTargetRegular=7
+InpTargetBeast=10
 InpMaxBatchRiskPct=15
 InpNews=true
 InpTickConfirm=true
