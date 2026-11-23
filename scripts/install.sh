@@ -24,15 +24,19 @@ mapfile -t MQL5_DIRS < <(find "$WINEPREFIX/drive_c" -type d -path '*/MQL5/Expert
 
 compile() {   # $1 = .mq5 file, $2 = MQL5 folder
   local src="$1" mql5="$2" base="${1%.mq5}"
-  rm -f "$base.ex5" "$base.log"
+  # keep the last compiled .ex5: under Wine the command-line compile usually fails, and deleting
+  # it would make the bot disappear from MT5's Navigator until F7 is pressed
+  local before=0
+  [ -f "$base.ex5" ] && before=$(stat -c %Y "$base.ex5")
+  rm -f "$base.log"
   local win_src win_mql5
   win_src="$("$WINE" winepath -w "$src" 2>/dev/null | tr -d '\r')"
   win_mql5="$("$WINE" winepath -w "$mql5" 2>/dev/null | tr -d '\r')"
   "$WINE" "$EDITOR_EXE" /compile:"$win_src" /inc:"$win_mql5" /log >/dev/null 2>&1 || true
-  if [ -f "$base.ex5" ]; then
+  if [ -f "$base.ex5" ] && [ "$(stat -c %Y "$base.ex5")" -gt "$before" ]; then
     echo "    $(basename "$src"): compiled OK"
   else
-    echo "    $(basename "$src"): NOT compiled here. Open it in MetaEditor and press F7."
+    echo "    $(basename "$src"): NOT compiled here (the previous version stays in MT5). Open it in MetaEditor and press F7."
     if [ -f "$base.log" ]; then
       iconv -f UTF-16LE -t UTF-8 "$base.log" 2>/dev/null | grep -Ei 'error|warning|result' || true
     fi
