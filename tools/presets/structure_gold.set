@@ -5,6 +5,7 @@ InpPullbackPct=38
 InpEntryWindow=3
 InpMaxChaseR=0.5
 InpMinMoveCandles=4
+InpSpikeCandles=4
 InpSpikeMult=4
 InpSpikeCooldown=30
 InpStopBufferCandles=0.5
