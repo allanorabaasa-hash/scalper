@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Allan"
 #property link      "https://github.com/allanorabaasa-hash/scalper"
-#property version   "19.20"
+#property version   "19.30"
 #property description "Market structure only (no indicators), all on M1: break of structure / shift detection, live-tick"
 #property description "triggers confirmed by real tick flow when available. Modes: Slow (1 +/-1), Regular (2 +/-2), Beast (5, +5 / back to 5). R:R 1:3, partials at TP1/TP2."
 
@@ -182,13 +182,10 @@ string PrefKey()       { return StateKey() + "_pref_" + _Symbol; }
 // dialog wins over it (the inputs it was chosen against are remembered).
 int DefaultMode()
   {
+   // Auto starts every symbol in Slow; Regular and Beast are chosen on the panel or the inputs.
    if(InpMode != BOTMODE_AUTO)
       return InpMode;
-   if(IsBtc())
-      return BOTMODE_BEAST;
-   if(StringFind(_Symbol, "XAU") >= 0 || StringFind(_Symbol, "GOLD") >= 0)
-      return BOTMODE_SLOW;
-   return BOTMODE_REGULAR;
+   return BOTMODE_SLOW;
   }
 
 void LoadPrefs()
@@ -254,10 +251,10 @@ int    ModeStart()     { return g_mode == BOTMODE_SLOW ? 1 : (g_mode == BOTMODE_
 int    ModeStep()      { return ModeStart(); }
 string ModeName()      { return g_mode == BOTMODE_SLOW ? "SLOW" : (g_mode == BOTMODE_REGULAR ? "REGULAR" : "BEAST"); }
 double TargetPct()     { return g_mode == BOTMODE_SLOW ? InpTargetSlow : (g_mode == BOTMODE_REGULAR ? InpTargetRegular : InpTargetBeast); }
-// Account result today (closed + open, all symbols) against the equity at the start of the broker's day.
-double DayResult()     { return g_risk.DayStartEquity() > 0 ? AccountInfoDouble(ACCOUNT_EQUITY) - g_risk.DayStartEquity() : 0; }
-double TargetMoney()   { return g_risk.DayStartEquity() * TargetPct() / 100.0; }
-bool   TargetReached() { return TargetPct() > 0 && g_risk.DayStartEquity() > 0 && DayResult() >= TargetMoney(); }
+// Account result today (closed + open, all symbols) against the balance at the start of the broker's day.
+double DayResult()     { return g_risk.DayStartBalance() > 0 ? AccountInfoDouble(ACCOUNT_EQUITY) - g_risk.DayStartBalance() : 0; }
+double TargetMoney()   { return g_risk.DayStartBalance() * TargetPct() / 100.0; }
+bool   TargetReached() { return TargetPct() > 0 && g_risk.DayStartBalance() > 0 && DayResult() >= TargetMoney(); }
 // Bitcoin swings are about twice as wide as gold's in % terms
 double MaxStopPct()    { return IsBtc() ? InpMaxStopPctBtc : InpMaxStopPct; }
 

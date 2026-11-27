@@ -58,7 +58,7 @@ private:
    string            m_symbol;
    string            m_key;
    datetime          m_day;               // start of the current broker trading day
-   double            m_dayStartEquity;
+   double            m_dayStartBalance;
    int               m_lock;
    string            m_lockNote;
 
@@ -84,7 +84,7 @@ private:
    void              SetLock(const int lock, const string note);
 
 public:
-                     CRiskManager() { m_day = 0; m_dayStartEquity = 0; m_lock = LOCK_NONE; }
+                     CRiskManager() { m_day = 0; m_dayStartBalance = 0; m_lock = LOCK_NONE; }
    bool              Init(const string symbol, const RiskConfig &cfg);
    bool              Update();
    void              TriggerEmergency(const string note);
@@ -94,11 +94,11 @@ public:
    bool              Locked()          const { return m_lock != LOCK_NONE; }
    string            LockText();
    ENUM_EMERGENCY_POLICY EmergencyPolicy() const { return m_cfg.emergencyPolicy; }
-   double            DayStartEquity()  const { return m_dayStartEquity; }
+   double            DayStartBalance()  const { return m_dayStartBalance; }
    double            Realized()        const { return m_realized; }
    double            Floating()        const { return m_floating; }
    double            DayPL()           const { return m_realized + m_floating; }
-   double            DrawdownPct()     { return RM_DayDrawdownPct(m_dayStartEquity, AccountInfoDouble(ACCOUNT_EQUITY)); }
+   double            DrawdownPct()     { return RM_DayDrawdownPct(m_dayStartBalance, AccountInfoDouble(ACCOUNT_EQUITY)); }
    double            DayLossUsedPct();
    int               OpenPositions()   const { return m_openPositions; }
    int               EntriesToday()    const { return m_entriesToday; }
@@ -125,18 +125,18 @@ bool CRiskManager::Init(const string symbol, const RiskConfig &cfg)
    datetime today = RM_DayStart(Now());
    ScanPositions();
 
-   bool restored = GlobalVariableCheck(GV("day")) && GlobalVariableCheck(GV("dayeq"))
+   bool restored = GlobalVariableCheck(GV("day")) && GlobalVariableCheck(GV("daybal"))
                    && (datetime)(long)GlobalVariableGet(GV("day")) == today;
    if(restored)
      {
       m_day = today;
-      m_dayStartEquity = GlobalVariableGet(GV("dayeq"));
+      m_dayStartBalance = GlobalVariableGet(GV("daybal"));
       if(GlobalVariableCheck(GV("lock")) && GlobalVariableCheck(GV("lockday"))
          && (datetime)(long)GlobalVariableGet(GV("lockday")) == today)
          m_lock = (int)GlobalVariableGet(GV("lock"));
       ScanHistory();
-      PrintFormat("Risk: restored trading day %s, start equity %.2f, lock %d",
-                  TimeToString(m_day, TIME_DATE), m_dayStartEquity, m_lock);
+      PrintFormat("Risk: restored trading day %s, start balance %.2f, lock %d",
+                  TimeToString(m_day, TIME_DATE), m_dayStartBalance, m_lock);
      }
    else
      {
@@ -153,7 +153,7 @@ bool CRiskManager::Init(const string symbol, const RiskConfig &cfg)
 void CRiskManager::SaveState()
   {
    GlobalVariableSet(GV("day"), (double)(long)m_day);
-   GlobalVariableSet(GV("dayeq"), m_dayStartEquity);
+   GlobalVariableSet(GV("daybal"), m_dayStartBalance);
    GlobalVariableSet(GV("lock"), (double)m_lock);
    GlobalVariableSet(GV("lockday"), (double)(long)m_day);
   }
@@ -161,11 +161,11 @@ void CRiskManager::SaveState()
 void CRiskManager::StartDay(const datetime day, const double startEquity, const string how)
   {
    m_day            = day;
-   m_dayStartEquity = startEquity;
+   m_dayStartBalance = startEquity;
    m_lock           = LOCK_NONE;
    m_lockNote       = "";
    SaveState();
-   PrintFormat("Risk: new trading day %s, start equity %.2f (%s)", TimeToString(day, TIME_DATE), startEquity, how);
+   PrintFormat("Risk: new trading day %s, start balance %.2f (%s)", TimeToString(day, TIME_DATE), startEquity, how);
   }
 
 void CRiskManager::SetLock(const int lock, const string note)
@@ -297,7 +297,7 @@ bool CRiskManager::Update()
   {
    datetime today = RM_DayStart(Now());
    if(today > m_day)
-      StartDay(today, AccountInfoDouble(ACCOUNT_EQUITY), "equity at the day boundary");
+      StartDay(today, AccountInfoDouble(ACCOUNT_BALANCE), "balance at the day boundary");
 
    ScanPositions();
    ScanHistory();
@@ -307,7 +307,7 @@ bool CRiskManager::Update()
    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
 
    // Emergency: equity drawdown from the day's start
-   double dd = RM_DayDrawdownPct(m_dayStartEquity, equity);
+   double dd = RM_DayDrawdownPct(m_dayStartBalance, equity);
    if(m_cfg.emergencyDDPct > 0 && dd >= m_cfg.emergencyDDPct)
      {
       TriggerEmergency(StringFormat("equity down %.1f%% today", dd));
@@ -325,10 +325,10 @@ bool CRiskManager::Update()
    // i.e. on the realised result (open trades keep their own SL/TP).
    if(m_openPositions == 0)
      {
-      if(RM_DailyLossHit(m_dayStartEquity, equity, m_cfg.maxDailyLossPct))
-         SetLock(LOCK_DAILY_LOSS, StringFormat("day result %.2f", equity - m_dayStartEquity));
-      else if(RM_DailyTargetHit(m_dayStartEquity, equity, m_cfg.dailyTargetPct))
-         SetLock(LOCK_TARGET, StringFormat("day result +%.2f", equity - m_dayStartEquity));
+      if(RM_DailyLossHit(m_dayStartBalance, equity, m_cfg.maxDailyLossPct))
+         SetLock(LOCK_DAILY_LOSS, StringFormat("day result %.2f", equity - m_dayStartBalance));
+      else if(RM_DailyTargetHit(m_dayStartBalance, equity, m_cfg.dailyTargetPct))
+         SetLock(LOCK_TARGET, StringFormat("day result +%.2f", equity - m_dayStartBalance));
      }
    return false;
   }
@@ -353,12 +353,12 @@ string CRiskManager::LockText()
 
 double CRiskManager::DayLossUsedPct()
   {
-   if(m_dayStartEquity <= 0 || m_cfg.maxDailyLossPct <= 0)
+   if(m_dayStartBalance <= 0 || m_cfg.maxDailyLossPct <= 0)
       return 0.0;
-   double loss = m_dayStartEquity - AccountInfoDouble(ACCOUNT_EQUITY);
+   double loss = m_dayStartBalance - AccountInfoDouble(ACCOUNT_EQUITY);
    if(loss <= 0)
       return 0.0;
-   return loss / (m_dayStartEquity * m_cfg.maxDailyLossPct / 100.0) * 100.0;
+   return loss / (m_dayStartBalance * m_cfg.maxDailyLossPct / 100.0) * 100.0;
   }
 
 //+------------------------------------------------------------------+
@@ -370,9 +370,9 @@ string CRiskManager::CanOpen()
       return LockText();
 
    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-   if(RM_DailyLossHit(m_dayStartEquity, equity, m_cfg.maxDailyLossPct))
+   if(RM_DailyLossHit(m_dayStartBalance, equity, m_cfg.maxDailyLossPct))
       return StringFormat("daily loss limit reached (%.2f of %.2f allowed)",
-                          m_dayStartEquity - equity, m_dayStartEquity * m_cfg.maxDailyLossPct / 100.0);
+                          m_dayStartBalance - equity, m_dayStartBalance * m_cfg.maxDailyLossPct / 100.0);
    if(m_cfg.maxConsecLosses > 0 && m_consecLosses >= m_cfg.maxConsecLosses)
       return StringFormat("%d losses in a row: no new trades today", m_consecLosses);
    if(m_cfg.maxDailyTrades > 0 && m_entriesToday >= m_cfg.maxDailyTrades)

@@ -64,13 +64,15 @@ sent at once so they fill within about a second. Input **Mode**:
 | Regular | 2 positions | +2 | -2 (never below 2) |
 | **Beast** | 5 positions | +5 | back to 5 |
 
-**Daily target per mode:** Slow **5%**, Regular **7%**, Beast **10%** of the account's equity at
-the start of the broker's day (all symbols, closed + open). Once reached, no new batches until
+**Daily target per mode:** Slow **5%**, Regular **7%**, Beast **10%** of the account's *balance*
+at the start of the broker's day (all symbols). The day's result is equity minus that starting
+balance, so open profit counts toward the target. Once reached, no new batches until
 the next day; a batch that is open keeps its stops and partials. Inputs, 0 = off. The panel's
 DAY P/L tile shows the result against the target (e.g. `+8.20 / +15.00`).
 
-Default mode (input *Mode* = Auto): **gold Slow, bitcoin Beast**, other symbols Regular. The
-panel buttons still switch it.
+Default mode (input *Mode* = Auto): **every symbol starts in Slow**, gold and bitcoin alike. The
+panel buttons still switch it. A mode chosen on the panel is remembered per chart, so a chart
+that was switched to Beast keeps Beast until you click SLOW.
 
 A batch that ends at about zero (breakeven exits, spread: within 20% of the batch's risk) is
 neither a win nor a loss: the size stays the same, it never increases on a 0 result. Max 20
