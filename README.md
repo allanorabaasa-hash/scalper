@@ -65,8 +65,8 @@ sent at once so they fill within about a second. Input **Mode**:
 | **Beast** | 5 positions | +5 | back to 5 |
 
 **Daily target per mode:** Slow **5%**, Regular **7%**, Beast **10%** of the account's *balance*
-at the start of the broker's day (all symbols). The day's result is equity minus that starting
-balance, so open profit counts toward the target. Once reached, no new batches until
+at the start of the broker's day. The day's result is this bot's realised plus open profit on
+that symbol (deposits and top-ups don't count). Each chart keeps its own target. Once reached, no new batches until
 the next day; a batch that is open keeps its stops and partials. Inputs, 0 = off. The panel's
 DAY P/L tile shows the result against the target (e.g. `+8.20 / +15.00`).
 

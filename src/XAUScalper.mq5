@@ -194,8 +194,9 @@ void LoadPrefs()
    g_lot  = InpLot;
    if(MQLInfoInteger(MQL_TESTER))
       return;
-   if(GlobalVariableCheck(PrefKey() + "_inMode") && (int)GlobalVariableGet(PrefKey() + "_inMode") == (int)InpMode
-      && GlobalVariableCheck(PrefKey() + "_mode"))
+   // Saved modes from before v19.30 are ignored once (they could be Beast): the default applies again.
+   if(GlobalVariableCheck(PrefKey() + "_v2") && GlobalVariableCheck(PrefKey() + "_inMode")
+      && (int)GlobalVariableGet(PrefKey() + "_inMode") == (int)InpMode && GlobalVariableCheck(PrefKey() + "_mode"))
       g_mode = (int)GlobalVariableGet(PrefKey() + "_mode");
    if(GlobalVariableCheck(PrefKey() + "_inLot") && MathAbs(GlobalVariableGet(PrefKey() + "_inLot") - InpLot) < 1e-9
       && GlobalVariableCheck(PrefKey() + "_lot"))
@@ -207,6 +208,7 @@ void SavePrefs()
   {
    if(MQLInfoInteger(MQL_TESTER))
       return;
+   GlobalVariableSet(PrefKey() + "_v2", 1.0);
    GlobalVariableSet(PrefKey() + "_inMode", (double)InpMode);
    GlobalVariableSet(PrefKey() + "_inLot", InpLot);
    GlobalVariableSet(PrefKey() + "_mode", (double)g_mode);
@@ -251,8 +253,8 @@ int    ModeStart()     { return g_mode == BOTMODE_SLOW ? 1 : (g_mode == BOTMODE_
 int    ModeStep()      { return ModeStart(); }
 string ModeName()      { return g_mode == BOTMODE_SLOW ? "SLOW" : (g_mode == BOTMODE_REGULAR ? "REGULAR" : "BEAST"); }
 double TargetPct()     { return g_mode == BOTMODE_SLOW ? InpTargetSlow : (g_mode == BOTMODE_REGULAR ? InpTargetRegular : InpTargetBeast); }
-// Account result today (closed + open, all symbols) against the balance at the start of the broker's day.
-double DayResult()     { return g_risk.DayStartBalance() > 0 ? AccountInfoDouble(ACCOUNT_EQUITY) - g_risk.DayStartBalance() : 0; }
+// This bot's result today (closed + open trades only). Equity minus balance would also count deposits and top-ups.
+double DayResult()     { return g_risk.DayPL(); }
 double TargetMoney()   { return g_risk.DayStartBalance() * TargetPct() / 100.0; }
 bool   TargetReached() { return TargetPct() > 0 && g_risk.DayStartBalance() > 0 && DayResult() >= TargetMoney(); }
 // Bitcoin swings are about twice as wide as gold's in % terms
