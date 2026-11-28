@@ -20,7 +20,7 @@ enum ENUM_BOT_MODE
    BOTMODE_SLOW    = 0,   // Slow: 1 position, +1 after a win, -1 after a loss
    BOTMODE_REGULAR = 1,   // Regular: 2 positions, +2 after a win, -2 after a loss
    BOTMODE_BEAST   = 2,   // Beast: 5 positions, +5 after a win, back to 5 after a loss
-   BOTMODE_AUTO    = 3    // Auto: gold Slow, bitcoin Beast, others Regular
+   BOTMODE_AUTO    = 3    // Auto: every symbol starts in Slow
   };
 
 #define REWARD_R 3.0   // risk : reward is strictly 1 : 3 (TP1 = 0.7R, TP2 = 2R, TP3 = 3R)
