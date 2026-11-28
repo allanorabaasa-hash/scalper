@@ -59,6 +59,7 @@ private:
    string            m_key;
    datetime          m_day;               // start of the current broker trading day
    double            m_dayStartBalance;
+   double            m_accountDayNet;   // all deals on the account today: profit + commission + swap + fee
    int               m_lock;
    string            m_lockNote;
 
@@ -84,7 +85,7 @@ private:
    void              SetLock(const int lock, const string note);
 
 public:
-                     CRiskManager() { m_day = 0; m_dayStartBalance = 0; m_lock = LOCK_NONE; }
+                     CRiskManager() { m_day = 0; m_dayStartBalance = 0; m_accountDayNet = 0; m_lock = LOCK_NONE; }
    bool              Init(const string symbol, const RiskConfig &cfg);
    bool              Update();
    void              TriggerEmergency(const string note);
@@ -95,6 +96,7 @@ public:
    string            LockText();
    ENUM_EMERGENCY_POLICY EmergencyPolicy() const { return m_cfg.emergencyPolicy; }
    double            DayStartBalance()  const { return m_dayStartBalance; }
+   double            AccountDayNet()   const { return m_accountDayNet; }
    double            Realized()        const { return m_realized; }
    double            Floating()        const { return m_floating; }
    double            DayPL()           const { return m_realized + m_floating; }
@@ -125,12 +127,12 @@ bool CRiskManager::Init(const string symbol, const RiskConfig &cfg)
    datetime today = RM_DayStart(Now());
    ScanPositions();
 
-   bool restored = GlobalVariableCheck(GV("day")) && GlobalVariableCheck(GV("daybal"))
+   bool restored = GlobalVariableCheck(GV("day")) && GlobalVariableCheck(GV("daybal2"))
                    && (datetime)(long)GlobalVariableGet(GV("day")) == today;
    if(restored)
      {
       m_day = today;
-      m_dayStartBalance = GlobalVariableGet(GV("daybal"));
+      m_dayStartBalance = GlobalVariableGet(GV("daybal2"));
       if(GlobalVariableCheck(GV("lock")) && GlobalVariableCheck(GV("lockday"))
          && (datetime)(long)GlobalVariableGet(GV("lockday")) == today)
          m_lock = (int)GlobalVariableGet(GV("lock"));
@@ -144,7 +146,7 @@ bool CRiskManager::Init(const string symbol, const RiskConfig &cfg)
       // equity as balance minus what this EA has realised today.
       m_day = today;
       ScanHistory();
-      StartDay(today, AccountInfoDouble(ACCOUNT_BALANCE) - m_realized, "estimated from balance");
+      StartDay(today, AccountInfoDouble(ACCOUNT_BALANCE) - m_accountDayNet, "balance at the start of the day");
      }
    return true;
   }
@@ -153,7 +155,7 @@ bool CRiskManager::Init(const string symbol, const RiskConfig &cfg)
 void CRiskManager::SaveState()
   {
    GlobalVariableSet(GV("day"), (double)(long)m_day);
-   GlobalVariableSet(GV("daybal"), m_dayStartBalance);
+   GlobalVariableSet(GV("daybal2"), m_dayStartBalance);
    GlobalVariableSet(GV("lock"), (double)m_lock);
    GlobalVariableSet(GV("lockday"), (double)(long)m_day);
   }
@@ -206,6 +208,7 @@ void CRiskManager::ScanHistory()
    m_realized = 0;  m_entriesToday = 0;  m_closedToday = 0;  m_winsToday = 0;
    m_consecLosses = 0;  m_grossWin = 0;  m_grossLoss = 0;
    m_lastEntry = 0;  m_lastLossClose = 0;
+   m_accountDayNet = 0;
 
    if(!HistorySelect(m_day, Now() + 86400))
       return;
@@ -221,7 +224,12 @@ void CRiskManager::ScanHistory()
    for(int i = 0; i < total; i++)
      {
       ulong d = HistoryDealGetTicket(i);
-      if(d == 0 || HistoryDealGetString(d, DEAL_SYMBOL) != m_symbol)
+      if(d == 0)
+         continue;
+      // every balance-changing deal on the account today (trades, deposits, withdrawals, credits)
+      m_accountDayNet += HistoryDealGetDouble(d, DEAL_PROFIT) + HistoryDealGetDouble(d, DEAL_COMMISSION)
+                         + HistoryDealGetDouble(d, DEAL_SWAP) + HistoryDealGetDouble(d, DEAL_FEE);
+      if(HistoryDealGetString(d, DEAL_SYMBOL) != m_symbol)
          continue;
       long entry = HistoryDealGetInteger(d, DEAL_ENTRY);
       long posId = HistoryDealGetInteger(d, DEAL_POSITION_ID);
